@@ -39,18 +39,49 @@ hook 事件映射：`UserPromptSubmit`→running / `Stop`→done / `Notification
 
 ---
 
+## 换了机器怎么接着做
+
+**必须 clone 到 `~/.claude/session-board/`**，不能放别处 —— `board-core.js` 的 `INSTALL_DIR` 和注册进 `settings.json` 的 hook 路径都以它为准（见铁律 4）。
+
+```
+git clone https://github.com/ken-whk/cc-session-board.git ~/.claude/session-board
+cd ~/.claude/session-board
+npm i          # node_modules 不进仓；只有打包才真正需要它，npm start 也依赖 electron
+npm start      # 从源码跑，开发时用这个
+node install-hooks.js    # 注册 4 个 hook（首次启动时 app/first-run.js 也会自动做）
+```
+
+跟着仓库走的：代码、`README.md`、**本文件**（所有踩过的坑）。
+**不跟着走**的：`state/` `hidden.json` `ui*.json`（本机运行数据，by design）、以及这台机器 Claude Code 的 memory —— 所以别把作业约束写进 memory，**写进本文件**。
+
+新机器只需要 node + Claude Code；不需要 PowerShell 特定版本（三个 .ps1 只是调试工具，不跑也不影响看板）。
+
+从源码跑（`npm start`）比装打包版省事：**没有"同步进 bundle"这一步**，改完重启即可。只有要发给别人时才需要打包（见文末「分发」）。
+
+---
+
 ## 铁律（踩过的坑，全部有实证）
 
-### 1. 改完 JS/HTML 必须同步进已安装的那份，否则跑的还是旧代码
+### 1. 跑的是打包版时，改完 JS/HTML 必须同步进去，否则跑的还是旧代码
 
-跑的是 `D:\Tools\ClaudeBoard-win-x64\`，不是源码目录：
+**先确认在跑哪一份**（这一步不能跳，本机踩过）：
 
 ```
-cp board-core.js  "D:/Tools/ClaudeBoard-win-x64/resources/app/board-core.js"
-cp app/*.js app/index.html "D:/Tools/ClaudeBoard-win-x64/resources/app/app/"
+Get-CimInstance Win32_Process -Filter "Name='ClaudeBoard.exe'" | Select ProcessId,ExecutablePath
 ```
 
-拷完 `cmp -s` 逐个比对确认。**只改 JS/HTML 不必重打整包**，symlink 不受影响。
+- **从源码跑**（`npm start`）→ 改完直接重启，**没有同步这一步**。开发时推荐这种。
+- **跑打包版** → 源码目录的改动对它无效，必须拷进 `<包目录>/resources/app/`：
+
+  ```
+  BUNDLE=<上面查出来的 ExecutablePath 所在目录>
+  cp board-core.js "$BUNDLE/resources/app/board-core.js"
+  cp app/*.js app/index.html "$BUNDLE/resources/app/app/"
+  ```
+
+  拷完 `cmp -s` 逐个比对确认。**只改 JS/HTML 不必重打整包**，symlink 不受影响。
+
+（本机 2026-08 时的包在 `D:\Tools\ClaudeBoard-win-x64\`，换机器后按上面的命令重新查，别照抄这个路径。）
 
 ### 2. 重启必须"全杀再拉起"，否则被单实例锁静默挡掉
 
