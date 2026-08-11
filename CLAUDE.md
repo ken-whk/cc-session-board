@@ -1,6 +1,8 @@
 # Claude 会话看板（session-board）
 
-本机自建的并发会话状态面板。**不在任何 git 仓里** —— 改动没有回退点，动大改造前先手动拷一份备份目录。
+本机自建的并发会话状态面板。远端 `github.com/ken-whk/cc-session-board`（私有仓，分支 `main`）。
+
+**提交纪律**：`state/` / `_last-payload-*.json` / `hidden.json` / `ui*.json` 装的是运行数据（含会话标题、项目路径、你敲的原话），已在 `.gitignore` 里挡掉 —— 新增任何写运行数据的文件时，**先确认它被 ignore 再 `git add -A`**。本仓用 repo-local 身份提交（`ken-whk@users.noreply.github.com`），不要用全局的公司邮箱。
 
 产品说明看 `README.md`（面向使用者）；本文件是给 AI 的作业约束（面向修改者）。
 
