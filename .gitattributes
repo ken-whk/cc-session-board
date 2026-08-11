@@ -1,0 +1,13 @@
+# 行尾统一交给 git 管，避免不同机器的 autocrlf 设置把文件搅乱。
+
+* text=auto
+
+# .cmd 必须 CRLF —— cmd.exe 处理 LF-only 批处理会出问题，
+# 典型症状是带括号的 if 块静默失败（build-mac.cmd 头部记着这条实测）。
+*.cmd text eol=crlf
+
+# .ps1 同样按 Windows 行尾存 —— 这三个脚本只在本机跑。
+*.ps1 text eol=crlf
+
+# 二进制，别做任何转换
+*.png binary

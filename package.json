@@ -1,0 +1,16 @@
+{
+  "name": "claude-session-board",
+  "version": "2.0.0",
+  "description": "Claude 会话看板 —— 并发会话状态面板（Windows / macOS）",
+  "main": "app/main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack:win": "electron-packager . ClaudeBoard --platform=win32 --arch=x64 --out=dist --overwrite --asar=false --icon=app/icon.png --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/_last-payload|^/board-capture|^/frames)\"",
+    "pack:mac": "electron-packager . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/_last-payload|^/board-capture|^/frames)\""
+  },
+  "private": true,
+  "devDependencies": {
+    "electron": "^43.0.0",
+    "electron-packager": "^17.1.2"
+  }
+}
