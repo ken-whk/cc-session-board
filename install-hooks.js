@@ -16,7 +16,13 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 
-const SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
+// 认 CLAUDE_CONFIG_DIR —— 与 board-core.js / hook.js 同口径。
+// 写错目录的后果是"hook 装了但 Claude Code 读的是另一份 settings.json"，
+// 表现为看板一直空着、健康检查却说链路正常。
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR
+  ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
+  : path.join(os.homedir(), '.claude')
+const SETTINGS = path.join(CLAUDE_DIR, 'settings.json')
 
 // 事件 -> 传给 hook.js 的状态实参。
 const MAP = {

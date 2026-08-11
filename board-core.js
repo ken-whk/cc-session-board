@@ -13,6 +13,7 @@
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const { createHash } = require('crypto')
 
 // ---- 可调阈值 ----
 
@@ -29,7 +30,14 @@ const ASK_TAIL_BYTES = 64 * 1024
 // Why：不分档的话隔夜挂着的会话永远霸榜，把刚跑完的挤到最下面。
 const IDLE_LONG_MS = 2 * 60 * 60 * 1000
 
-const CLAUDE_DIR = path.join(os.homedir(), '.claude')
+// Claude Code 的配置根目录。**必须认 CLAUDE_CONFIG_DIR** ——
+// 用户把 .claude 挪走时，claude-hud 等周边工具都读这个变量；
+// 看板不认就会一边（hud）往 $CLAUDE_CONFIG_DIR 写、一边（看板）去 ~/.claude 找，
+// 表现为"明明开启了用量快照却一直显示未启用"，且极难自查。
+// hook.js / install-hooks.js 里有同样的推导，改这里必须同步改那两处。
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR
+  ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
+  : path.join(os.homedir(), '.claude')
 
 // 可写数据（state / UI 设置 / 已安装的 hook.js）一律住这里，**固定在 home 下**。
 // 早先用 __dirname，在源码目录跑时恰好等于同一个路径，所以本机从没暴露问题；
@@ -61,6 +69,37 @@ const SETTINGS_JSON = path.join(CLAUDE_DIR, 'settings.json')
 // 实测 macOS 上同样存在且格式一致。
 const SESSIONS_DIR = path.join(CLAUDE_DIR, 'sessions')
 
+// ---- 上下文用量：两个信源都是"借"来的，都不是我们的契约 ----
+
+// claude-hud 的 per-session 上下文快照目录。文件名 = sha256(path.resolve(transcript_path))，
+// 内容含 used_percentage / current_usage / context_window_size / saved_at。
+// 每个会话自己的 statusline 进程每 ~3s 刷一次，所以是活数据。
+//
+// Why 借它而不自己算：真正准确的 used_percentage 由 Claude Code 通过
+// **statusline 的 stdin**（context_window 字段）下发，hook payload 里没有这个字段
+// （实测 4 类 payload 的 key 都没有）—— 看板作为独立进程根本拿不到原生值。
+// hud 的注释也明说原生值 "accurate and matches /context"，自己累加只是近似。
+// 代价：这是 hud 的私有缓存、无公开契约，它升级改格式就会失效 -> 必须有兜底。
+const HUD_DIR = path.join(CLAUDE_DIR, 'plugins', 'claude-hud')
+const HUD_CONTEXT_CACHE_DIR = path.join(HUD_DIR, 'context-cache')
+
+// hud 解析 transcript 后的缓存，键的算法与 context-cache 相同。
+// 里面还有 tools / skills / todos / sessionTokens 等，目前只取 compactionCount。
+const HUD_TRANSCRIPT_CACHE_DIR = path.join(HUD_DIR, 'transcript-cache')
+
+// 账号级用量快照（5小时窗 / 7天窗）。由 claude-hud 的
+// display.externalUsageWritePath 配置项写出，是它给外部消费者留的正门。
+//
+// Why 不自己调 API：那两个数字来自 api.anthropic.com 的 usage 接口，认证要读
+// 你的 OAuth token（keychain / .credentials.json）。看板目前**零网络出口、
+// 不碰任何凭据**，这是它值得保住的属性 —— 为一个显示项破掉不值得。
+const USAGE_SNAPSHOT = path.join(CLAUDE_DIR, 'usage-snapshot.json')
+
+// 正在跑的会话，快照超过这个时长就视为"不新鲜"（可能低报），界面上灰显。
+// 只对运行中生效 —— 判据见 buildRows 里 ctxGrowing 处的注释。
+// 不直接隐藏：会话关掉后最后一次的占用量仍是有意义的信息。
+const CTX_STALE_MS = 2 * 60 * 1000
+
 const titleCache = new Map()
 const transcriptCache = new Map()
 const labelCache = new Map()
@@ -87,19 +126,44 @@ function fileMs(p) {
 // 配色原则：颜色信号集中在「状态」列的文字上（accent），行底色只做极淡的暗示（back）。
 // 整行铺饱和底色会让信号强度和覆盖面积不匹配，看着刺眼 —— 实测调整过。
 // fore 是行内其余文字的颜色：不需要你关注的状态压灰。
+//
+// desc 是给帮助面板用的一句话释义。放在这里而不是界面层：
+// 帮助里那份图例原先是手抄的一份平行清单，字形 / 配色 / 顺序改了不会同步，
+// 迟早变成"看起来权威但已过时"的说明。同源之后它抄不错。
 function statusMeta(status) {
   switch (status) {
-    case 'asking':  return { rank: 0, text: '？ 在问你',  accent: '#D32F2F', back: '#FFF4F4', fore: '#222222' }
-    case 'waiting': return { rank: 1, text: '▲ 等你输入', accent: '#E07C00', back: '#FFFAF1', fore: '#222222' }
-    case 'done':    return { rank: 2, text: '✔ 已完成',   accent: '#2E7D32', back: '#F5FAF6', fore: '#222222' }
-    case 'running': return { rank: 3, text: '● 运行中',   accent: '#1565C0', back: '#FFFFFF', fore: '#222222' }
-    case 'fresh':   return { rank: 4, text: '○ 空闲',     accent: '#9E9E9E', back: '#FFFFFF', fore: '#909090' }
-    case 'stalled': return { rank: 5, text: '… 失联？',   accent: '#757575', back: '#FAFAFA', fore: '#909090' }
-    case 'idle':    return { rank: 6, text: '· 久候',     accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0' }
-    case 'closed':  return { rank: 7, text: '✕ 已关闭',   accent: '#8D6E63', back: '#FAFAFA', fore: '#A0A0A0' }
-    case 'hidden':  return { rank: 8, text: '· 已隐藏',   accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0' }
-    default:        return { rank: 9, text: '? ' + status, accent: '#555555', back: '#FFFFFF', fore: '#222222' }
+    case 'asking':  return { rank: 0, text: '？ 在问你',  accent: '#D32F2F', back: '#FFF4F4', fore: '#222222', desc: '卡在 AskUserQuestion 等你作答，不理它就永远不会继续' }
+    case 'waiting': return { rank: 1, text: '▲ 等你输入', accent: '#E07C00', back: '#FFFAF1', fore: '#222222', desc: '空闲等待你的输入' }
+    case 'done':    return { rank: 2, text: '✔ 已完成',   accent: '#2E7D32', back: '#F5FAF6', fore: '#222222', desc: '这一轮跑完了，球在你手上' }
+    case 'running': return { rank: 3, text: '● 运行中',   accent: '#1565C0', back: '#FFFFFF', fore: '#222222', desc: '正在干活，不用管' }
+    case 'fresh':   return { rank: 4, text: '○ 空闲',     accent: '#9E9E9E', back: '#FFFFFF', fore: '#909090', desc: '会话开着但还没交互过' }
+    case 'stalled': return { rank: 5, text: '… 失联？',   accent: '#757575', back: '#FAFAFA', fore: '#909090', desc: '心跳静默超过 5 分钟（仅注册表降级时出现）' }
+    case 'idle':    return { rank: 6, text: '· 久候',     accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0', desc: '超过 2 小时没被处理，默认不显示' }
+    case 'closed':  return { rank: 7, text: '✕ 已关闭',   accent: '#8D6E63', back: '#FAFAFA', fore: '#A0A0A0', desc: '进程已退出（按 pid 精确判定），默认不显示' }
+    case 'hidden':  return { rank: 8, text: '· 已隐藏',   accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0', desc: '你手动隐藏的，默认不显示；它下次有动静会自己回来' }
+    default:        return { rank: 9, text: '? ' + status, accent: '#555555', back: '#FFFFFF', fore: '#222222', desc: '' }
   }
+}
+
+// 帮助面板的状态图例。顺序 = rank 顺序 = 「需求度」排序的顺序，
+// 所以图例本身就解释了默认排法。
+function statusLegend() {
+  return ['asking', 'waiting', 'done', 'running', 'fresh', 'stalled', 'idle', 'closed', 'hidden']
+    .map((eff) => {
+      const m = statusMeta(eff)
+      // 字形与文字拆开给界面：图例里字形要单独占一列才能对齐
+      // （？▲✔●○…·✕ 宽度各不相同，混在一个字符串里排出来是锯齿状的）
+      const sp = m.text.indexOf(' ')
+      return {
+        eff,
+        glyph: sp > 0 ? m.text.slice(0, sp) : '',
+        label: sp > 0 ? m.text.slice(sp + 1) : m.text,
+        text: m.text,
+        accent: m.accent,
+        back: m.back,
+        desc: m.desc,
+      }
+    })
 }
 
 // ---- 信源读取 ----
@@ -198,6 +262,154 @@ function readTranscriptTail(p, maxBytes) {
     } finally { fs.closeSync(fd) }
   } catch (_) {
     return { text: '', full: true }
+  }
+}
+
+// ---- 上下文用量读取 ----
+
+function formatTokens(n) {
+  if (!(n > 0)) return '—'
+  if (n >= 1000000) return (n / 1000000).toFixed(2).replace(/\.?0+$/, '') + 'M'
+  if (n >= 1000) return Math.round(n / 1000) + 'k'
+  return String(n)
+}
+
+// hud 的两个缓存都按 sha256(path.resolve(transcript_path)) 命名（读 hud 源码得到）
+function hudCacheFile(dir, transcriptPath) {
+  const hash = createHash('sha256').update(path.resolve(transcriptPath)).digest('hex')
+  return path.join(dir, hash + '.json')
+}
+
+// 首选信源：hud 的快照。命中即拿到与 /context 一致的原生百分比。
+function ctxFromHud(transcriptPath) {
+  if (!transcriptPath) return null
+  try {
+    const o = JSON.parse(fs.readFileSync(hudCacheFile(HUD_CONTEXT_CACHE_DIR, transcriptPath), 'utf8'))
+    const pct = Number(o.used_percentage)
+    if (!Number.isFinite(pct)) return null
+    const u = o.current_usage || {}
+    const tokens = (Number(u.input_tokens) || 0) +
+      (Number(u.cache_creation_input_tokens) || 0) +
+      (Number(u.cache_read_input_tokens) || 0)
+    return {
+      pct: Math.max(0, Math.min(100, Math.round(pct))),
+      tokens,
+      windowSize: Number(o.context_window_size) || 0,
+      savedAt: Number(o.saved_at) || 0,
+      source: 'hud',
+    }
+  } catch (_) {
+    // 没装 hud / 该会话没渲染过 statusline / 格式变了 -> 交给兜底
+    return null
+  }
+}
+
+// 兜底路径的窗口大小只能推。两个信源都**不带**这个事实：
+// transcript 的 message.model 是 "claude-opus-5"（实测无 [1m] 后缀）、
+// 会话注册表里也没有模型字段。唯一带标记的是 settings.json 的 "model": "opus[1m]"，
+// 但那是**全局默认**，某个会话中途 /model 切过就不准 -> 所以这条路的百分比标 ~。
+function defaultContextWindow() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_JSON, 'utf8'))
+    if (/\[1m\]/i.test(String(s.model || ''))) return 1000000
+  } catch (_) { /* 读不到就按小窗算，下面还有观测反推兜一层 */ }
+  return 200000
+}
+
+// 兜底信源：transcript 里**最后一条** assistant 消息的 usage。
+//
+// Why 取最后一条而不是累加所有消息：usage 是**时点值**（这一次请求送进去多少
+// 上下文），累加得到的是"整场花掉的 token 总量"，那是成本指标、不是占用量，
+// 会随会话长度无限增长。取时点值还天然躲过 compact —— 压缩后的下一条消息
+// 自己就反映了压缩后的上下文，不需要额外追 compact 边界。
+function ctxFromTranscript(transcriptPath, windowDefault) {
+  if (!transcriptPath) return null
+  const { text } = readTranscriptTail(transcriptPath, 512 * 1024)
+  if (!text) return null
+
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const ln = lines[i]
+    if (!ln || ln.indexOf('"usage"') < 0 || ln.indexOf('"assistant"') < 0) continue
+    let o
+    try { o = JSON.parse(ln) } catch (_) { continue }   // 尾部第一行常是截断的半条
+    const u = o && o.message && o.message.usage
+    if (!u) continue
+    const tokens = (Number(u.input_tokens) || 0) +
+      (Number(u.cache_creation_input_tokens) || 0) +
+      (Number(u.cache_read_input_tokens) || 0)
+    if (!(tokens > 0)) continue
+
+    // 观测反推：这次请求既然成功了就没有溢出，所以窗口至少装得下已观测到的
+    // token 量。settings.json 猜小了（会话单独切过 1M 模型）时靠这一层纠回来。
+    let windowSize = windowDefault > 0 ? windowDefault : 200000
+    if (tokens > windowSize) windowSize = 1000000
+
+    return {
+      pct: Math.max(0, Math.min(100, Math.round((tokens / windowSize) * 100))),
+      tokens,
+      windowSize,
+      savedAt: fileMs(transcriptPath),
+      source: 'transcript',
+    }
+  }
+  return null
+}
+
+function readContextUsage(transcriptPath, windowDefault) {
+  return ctxFromHud(transcriptPath) || ctxFromTranscript(transcriptPath, windowDefault)
+}
+
+/**
+ * 选中某行时才读的会话补充信息（详情面板用）。
+ *
+ * Why 不放进 buildRows：这是**按需**信息，只有被选中的那一行需要。
+ * 塞进每行循环等于每 1.5 秒多读 N 个文件，为一个偶尔看一眼的数字不值得。
+ *
+ * @param {string} transcriptPath 该会话的 transcript 路径
+ * @returns {{compactions:number}} compactions 为 -1 表示读不到（没装 hud / 该会话没渲染过 statusline）
+ */
+function readSessionMeta(transcriptPath) {
+  const res = { compactions: -1 }
+  if (!transcriptPath) return res
+  try {
+    const o = JSON.parse(fs.readFileSync(hudCacheFile(HUD_TRANSCRIPT_CACHE_DIR, transcriptPath), 'utf8'))
+    const n = Number(o && o.data && o.data.compactionCount)
+    if (Number.isFinite(n) && n >= 0) res.compactions = n
+  } catch (_) { /* 缓存不存在 / 格式变了 -> 保持 -1，界面显示"未知" */ }
+  return res
+}
+
+// 账号级用量快照。读不到就返回 null，界面整块不显示 ——
+// 不用 0% 冒充"还没用"，那是把"不知道"呈现成"很安全"。
+function readUsageWindows() {
+  let o
+  try {
+    o = JSON.parse(fs.readFileSync(USAGE_SNAPSHOT, 'utf8'))
+  } catch (_) {
+    return null
+  }
+  const win = (k) => {
+    const w = o && o[k]
+    const pct = Number(w && w.used_percentage)
+    if (!Number.isFinite(pct)) return null
+    const resetsAt = w.resets_at ? Date.parse(w.resets_at) : 0
+    return {
+      pct: Math.max(0, Math.min(100, Math.round(pct))),
+      resetsAt: Number.isFinite(resetsAt) ? resetsAt : 0,
+    }
+  }
+  const fiveHour = win('five_hour')
+  const sevenDay = win('seven_day')
+  if (!fiveHour && !sevenDay) return null
+  const updatedAt = o.updated_at ? Date.parse(o.updated_at) : 0
+  return {
+    fiveHour,
+    sevenDay,
+    updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0,
+    // hud 每次渲染 statusline 才刷（30s 节流）；全部会话都关掉时它就不再更新，
+    // 所以要让界面能把"陈旧"说出来，而不是把过期数字当现值展示。
+    stale: !updatedAt || (Date.now() - updatedAt) > 10 * 60 * 1000,
   }
 }
 
@@ -397,6 +609,9 @@ function buildRows(opts) {
   const regUsable = reg.size > 0
   let hiddenDirty = false
 
+  // 兜底路径要用的窗口大小，每帧读一次就够 —— 不要放进按行的循环里重复读文件
+  const ctxWindowDefault = defaultContextWindow()
+
   const stateBy = new Map()
   for (const s of states) stateBy.set(String(s.session_id), s)
 
@@ -508,10 +723,35 @@ function buildRows(opts) {
 
     const meta = statusMeta(eff)
 
+    // 上下文占用。读不到就留空字符串，界面显示 '—'。
+    //
+    // "陈旧"只对**正在跑**的会话成立 —— 它的上下文在增长，旧快照会低报。
+    // 空闲 / 等你输入 / 在问你 / 已关闭的会话上下文根本没在变，
+    // 最后一次快照就是当前真相，不该灰显（阻塞会话的 statusline 不再渲染，
+    // 快照必然变旧，按时间一刀切会把这些行全打成"不可信"）。
+    const ctx = readContextUsage(tp, ctxWindowDefault)
+    const ctxGrowing = (eff === 'running' || eff === 'stalled')
+    const ctxStale = !!(ctx && ctxGrowing && ctx.savedAt > 0 && (now - ctx.savedAt) > CTX_STALE_MS)
+
     rows.push({
       sessionId: id,
       cwd,
       transcript: tp,
+      ctxPct: ctx ? ctx.pct : -1,
+      // transcript 兜底算出来的百分比刻度依赖猜窗口大小，标 ~ 提示是近似值
+      ctxText: ctx ? ((ctx.source === 'transcript' ? '~' : '') + ctx.pct + '%') : '—',
+      ctxTokensText: ctx ? formatTokens(ctx.tokens) : '—',
+      ctxWindowText: ctx && ctx.windowSize ? formatTokens(ctx.windowSize) : '—',
+      ctxSource: ctx ? ctx.source : '',
+      ctxStale,
+      // 详情面板用的会话元信息，全部来自会话注册表（拿不到就留空 / 0）。
+      // 注意与上面的 started 区分：started 会用 first_seen 兜底、并且拿不到时
+      // 填 MAX_SAFE_INTEGER 供排序用，不能直接当"启动时刻"显示。
+      startedMs: (rg && Number(rg.startedAt)) || 0,
+      pid: (rg && Number(rg.pid)) || 0,
+      ccVersion: (rg && rg.version) ? String(rg.version) : '',
+      entrypoint: (rg && rg.entrypoint) ? String(rg.entrypoint) : '',
+      kind: (rg && rg.kind) ? String(rg.kind) : '',
       summary,
       lastPrompt,
       eff,
@@ -530,7 +770,10 @@ function buildRows(opts) {
       durText: formatDuration(dur),
       silentText: hasBeat ? formatDuration(silent) : '心跳未知',
       lifeText: (started > 0 && started < Number.MAX_SAFE_INTEGER) ? formatDuration(now - started) : '—',
+      // 原始数值一并给出去：界面要按列排序，而按 '3m20s' 这类显示文本排序
+      // 会得出 '10s' > '3m' 的荒谬结果。
       wait,
+      dur,
       silent,
       started,
     })
@@ -575,6 +818,7 @@ function buildRows(opts) {
   return {
     rows: visible,
     regUsable,
+    usage: readUsageWindows(),
     needYou: all.filter((r) => !r.hidden && (r.baseEff === 'asking' || r.baseEff === 'waiting' || r.baseEff === 'done')).length,
     idleCount: all.filter((r) => r.eff === 'idle').length,
     closedCount: all.filter((r) => r.eff === 'closed').length,
@@ -634,8 +878,11 @@ function clearStaleRecords() {
 }
 
 module.exports = {
-  buildRows, getLastExchange, getHealthIssues, getMissingHooks,
+  buildRows, getLastExchange, getHealthIssues, getMissingHooks, statusLegend,
   removeRecord, unhideRecord, clearStaleRecords, formatDuration,
+  // 用量快照的读取与路径由数据层单一定义，界面层/引导层都从这里取 ——
+  // 各自硬编码一份路径的话，改一处就会静默错位（引导写 A、看板读 B）。
+  readUsageWindows, readSessionMeta, USAGE_SNAPSHOT, HUD_DIR, HUD_CONTEXT_CACHE_DIR,
   BOARD_DIR, STATE_DIR, CLAUDE_DIR, SESSIONS_DIR, INSTALL_DIR, CODE_DIR, HOOK_JS, HIDDEN_JSON,
 }
 

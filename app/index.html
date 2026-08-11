@@ -6,89 +6,357 @@
 <title>Claude 会话看板</title>
 <style>
   /* 字体各平台取各自的系统 UI 字体，别硬指定某一款 —— Mac 上没有微软雅黑 */
+  /* 主题变量。深色不是"把白色反过来"就完事 —— 状态色、柱子里的数字、
+     行底色都得各有一套，所以全部收进变量，两套主题各赋一次值。 */
   :root {
+    --bg: #ffffff;
+    --fg: #222222;
+    --fg-dim: #9a9a9a;
     --line: #ececec;
     --muted: #8a8a8a;
     --hover: #f0f4f8;
     --sel: #d6e8f7;
+    --head-bg: #f7f7f7;
+    --head-hover: #eef1f4;
+    --border: #dddddd;
+    --panel: #fafafa;
+    --panel-line: #e5e5e5;
+    --chip-bg: #f5f6f8;
+    --chip-line: #e6e8ea;
+    --bar-bg: #fafbfc;
+    --track-bg: #f4f4f4;
+    --track-line: #cfcfcf;
+    --meter-fg: #1a1a1a;
+    --grip: #b9c2cc;
+    --link: #1565c0;
+    /* 状态文字色 */
+    --c-asking: #d32f2f; --c-waiting: #e07c00; --c-done: #2e7d32; --c-running: #1565c0;
+    --c-fresh: #9e9e9e; --c-stalled: #757575; --c-idle: #9e9e9e;
+    --c-closed: #8d6e63; --c-hidden: #9e9e9e;
+    /* 行底色：只做极淡的暗示，不铺饱和色 */
+    --t-asking: #fff4f4; --t-waiting: #fffaf1; --t-done: #f5faf6;
+    --t-plain: transparent; --t-dim: #fafafa;
+  }
+  html[data-theme="dark"] {
+    --bg: #1c1f22;
+    --fg: #e6e6e6;
+    --fg-dim: #8b9096;
+    --line: #2a2e33;
+    --muted: #8b9096;
+    --hover: #24292e;
+    --sel: #2c3e50;
+    --head-bg: #23272b;
+    --head-hover: #2b3035;
+    --border: #33383d;
+    --panel: #191c1f;
+    --panel-line: #2a2e33;
+    --chip-bg: #24282c;
+    --chip-line: #33383d;
+    --bar-bg: #191c1f;
+    --track-bg: #24282c;
+    --track-line: #3c4247;
+    --meter-fg: #f0f0f0;
+    --grip: #4a5057;
+    --link: #64b5f6;
+    --c-asking: #ff6b6b; --c-waiting: #ffab40; --c-done: #66bb6a; --c-running: #64b5f6;
+    --c-fresh: #9aa0a6; --c-stalled: #8d9298; --c-idle: #9aa0a6;
+    --c-closed: #bcaaa4; --c-hidden: #9aa0a6;
+    --t-asking: #2a1d1d; --t-waiting: #2a2419; --t-done: #1d2620;
+    --t-plain: transparent; --t-dim: #191b1d;
   }
   * { box-sizing: border-box; }
+  /* 滚动条也要跟主题。默认滚动条在深色下是一条亮灰，比不做深色更扎眼。 */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: var(--panel); }
+  ::-webkit-scrollbar-thumb { background: var(--track-line); border-radius: 5px; border: 2px solid var(--panel); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--grip); }
+  ::-webkit-scrollbar-corner { background: var(--panel); }
   html, body {
     margin: 0; height: 100%;
     font-family: "Microsoft YaHei UI", "PingFang SC", "Helvetica Neue", system-ui, sans-serif;
-    font-size: 13px; color: #222; background: #fff;
+    font-size: 13px; color: var(--fg); background: var(--bg);
     user-select: none;
   }
   body { display: flex; flex-direction: column; }
 
   .bar { padding: 8px 10px 0; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-  .bar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
-  .bar select, .bar button { font: inherit; padding: 3px 8px; }
-  .bar button { cursor: pointer; }
-  .stat { color: var(--muted); margin-left: auto; }
-  .health { padding: 4px 10px 8px; color: var(--muted); font-size: 12px; }
-  .health.warn { color: #b8860b; }
-  .health.bad { color: #b22222; }
 
-  .wrap { flex: 1; overflow: auto; margin: 0 10px; border: 1px solid #ddd; }
-  table { width: 100%; border-collapse: collapse; }
+  /* ---- 顶栏 = 自绘标题栏（titleBarOverlay）----
+     系统标题栏只能跟随系统深浅、底色不可指定，所以把它藏掉、由页面画。
+     两个约束：
+     ① 必须给系统按钮让位 —— Windows 的最小化/最大化/关闭在右、macOS 红绿灯在左，
+        位置由 env(titlebar-area-*) 给出，硬编码宽度换个系统就压住了；
+     ② 空白处要能拖动窗口（app-region: drag），但按钮必须 no-drag，
+        否则点不动、只能拖。 */
+  body.overlay .bar {
+    height: env(titlebar-area-height, 34px);
+    margin-left: env(titlebar-area-x, 0px);
+    width: env(titlebar-area-width, 100%);
+    padding: 0 10px;
+    flex-wrap: nowrap;
+    background: var(--head-bg);
+    border-bottom: 1px solid var(--border);
+    -webkit-app-region: drag;
+  }
+  body.overlay .bar button,
+  body.overlay .bar select,
+  body.overlay .bar .no-drag { -webkit-app-region: no-drag; }
+  body.overlay .bar button { padding: 2px 9px; }
+  /* 标题栏里的应用名：原生标题文字被藏掉了，不补一个窗口会显得没头 */
+  .apptitle { font-weight: 600; white-space: nowrap; }
+  body:not(.overlay) .apptitle { display: none; }
+  .bar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+  /* 按钮必须跟着主题走。浏览器默认按钮在深色下是一块白，
+     比不做深色更难看 —— 主题化不能只做背景和文字。 */
+  .bar button {
+    font: inherit; padding: 3px 9px; cursor: pointer;
+    background: var(--chip-bg); color: var(--fg);
+    border: 1px solid var(--track-line); border-radius: 5px;
+  }
+  .bar button:hover { background: var(--head-hover); }
+  .bar button:active { background: var(--track-bg); }
+  .stat { color: var(--fg); }
+  .stat b { font-weight: 600; }
+  .stat b.hot { color: var(--c-asking); }
+  .grow { flex: 1; }
+  .offhint { color: var(--muted); font-size: 12px; }
+
+  /* health 从整行散文降级为一颗灯。
+     常态那句"hook 链路正常（4 个事件已注册）· 会话注册表可用…"每次启动都一样，
+     读过一次之后就只是噪音，却占着一整行。异常才值得占版面：
+     bad 仍然铺整行（hook 断了看板数据就不准，必须挡眼），warn 只变黄灯。 */
+  .hdot { width: 8px; height: 8px; border-radius: 50%; background: #3aa06a; display: inline-block; }
+  .hdot.warn { background: #d6a81e; }
+  .hdot.bad { background: #c0392b; }
+  .health { padding: 4px 10px 8px; color: var(--c-asking); font-size: 12px; }
+  .health:empty { display: none; }
+
+  .wrap { flex: 1; overflow: auto; margin: 0 10px; border: 1px solid var(--border); }
+  /* table-layout: fixed —— 列宽由 colgroup 说话。
+     自动布局下浏览器会按内容重算宽度，拖出来的宽度当场被吃掉。 */
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
   thead th {
     position: sticky; top: 0; z-index: 1;
-    background: #f7f7f7; border-bottom: 1px solid #ddd;
+    background: var(--head-bg); border-bottom: 1px solid var(--border);
     padding: 6px 8px; text-align: left; font-weight: 600;
+    overflow: hidden; white-space: nowrap;
   }
+  thead th.sortable { cursor: pointer; position: sticky; }
+  thead th.sortable:hover { background: var(--head-hover); }
+  thead th.sorted { color: var(--link); }
+  thead th .arrow { font-style: normal; font-size: 9px; margin-left: 3px; vertical-align: 1px; }
+  /* 拖宽把手：贴在表头右边缘的一条 5px 热区。
+     它必须吃掉 mousedown/click，否则拖完顺带触发排序。 */
+  thead th .grip {
+    position: absolute; top: 0; right: 0; width: 5px; height: 100%;
+    cursor: col-resize; user-select: none;
+  }
+  thead th .grip:hover { background: var(--grip); }
+  /* 拖动期间锁光标 + 禁选，否则鼠标滑出表头就变回箭头、还会选中文字 */
+  body.resizing { cursor: col-resize; }
+  body.resizing * { cursor: col-resize !important; }
+  .sorthint { color: var(--muted); font-size: 12px; }
   tbody td { padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap;
              overflow: hidden; text-overflow: ellipsis; }
   tbody tr:hover { background: var(--hover) !important; }
   tbody tr.sel { background: var(--sel) !important; }
   /* 颜色信号集中在状态列的文字上，行底色只做极淡的暗示 ——
-     整行铺饱和底色会让信号强度和覆盖面积不匹配，看着刺眼 */
+     整行铺饱和底色会让信号强度和覆盖面积不匹配，看着刺眼。
+     配色由 tr[data-eff] 驱动而不是内联样式：要支持深色主题，
+     而内联样式优先级压过主题规则，只能靠 !important 硬顶。 */
   td.status { font-weight: 600; }
+  tr[data-eff="asking"]  { background: var(--t-asking); }
+  tr[data-eff="waiting"] { background: var(--t-waiting); }
+  tr[data-eff="done"]    { background: var(--t-done); }
+  tr[data-eff="running"] { background: var(--t-plain); }
+  tr[data-eff="fresh"]   { background: var(--t-plain); }
+  tr[data-eff="stalled"], tr[data-eff="idle"],
+  tr[data-eff="closed"],  tr[data-eff="hidden"] { background: var(--t-dim); }
+  /* 不需要你关注的状态，整行文字压灰 */
+  tr[data-eff="fresh"] td, tr[data-eff="stalled"] td, tr[data-eff="idle"] td,
+  tr[data-eff="closed"] td, tr[data-eff="hidden"] td { color: var(--fg-dim); }
+
+  tr[data-eff="asking"]  td.status, .st-asking  { color: var(--c-asking); }
+  tr[data-eff="waiting"] td.status, .st-waiting { color: var(--c-waiting); }
+  tr[data-eff="done"]    td.status, .st-done    { color: var(--c-done); }
+  tr[data-eff="running"] td.status, .st-running { color: var(--c-running); }
+  tr[data-eff="fresh"]   td.status, .st-fresh   { color: var(--c-fresh); }
+  tr[data-eff="stalled"] td.status, .st-stalled { color: var(--c-stalled); }
+  tr[data-eff="idle"]    td.status, .st-idle    { color: var(--c-idle); }
+  tr[data-eff="closed"]  td.status, .st-closed  { color: var(--c-closed); }
+  tr[data-eff="hidden"]  td.status, .st-hidden  { color: var(--c-hidden); }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
 
-  .detail { border-top: 1px solid #ddd; padding: 6px 10px 10px; }
+  /* 百分比柱（meter）：上下文列与顶部用量共用一个组件。
+     ① 显式轨道（灰底 + 描边）—— 早先把渐变直接铺在单元格背景上省了一层 DOM，
+        但没有可见的 0/100 边界，91% 和 49% 看上去只是"深浅不同的一块"。
+     ② 数字**放在柱子里面**，省掉一列宽度，且数值与刻度不再需要视线来回跳。
+     ③ 填充用中等浅度的 tint 而不是实色 —— 数字是深色的，跨过填充边缘时
+        两侧都得读得清；实色填充会把压在上面的那半截数字吃掉。 */
+  .meter {
+    position: relative; display: inline-block; vertical-align: middle;
+    width: 60px; height: 20px; border: 1px solid var(--track-line); border-radius: 4px;
+    background: var(--track-bg); overflow: hidden;
+  }
+  .meter i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; }
+  /* 数字压在柱子里，跨过填充边缘时两侧都得读得清 ——
+     所以填充用半透明而非实色，数字用接近纯黑 + 半粗。
+     实测过更浅的填充（alpha .3 左右）：读得清但"进度感"不足，看不出深浅递进。 */
+  .meter span {
+    position: absolute; left: 0; right: 0; top: 0; bottom: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; line-height: 1; color: var(--meter-fg); font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .meter.none { background: repeating-linear-gradient(45deg, var(--track-bg) 0 4px, var(--head-bg) 4px 8px); }
+  .meter.none span { color: var(--muted); }
+  /* 告警档：饱和大红底 + 白字。两个主题下都是白 —— 底色是同一个红。 */
+  .meter.crit span { color: #ffffff; }
+
+  /* "快照可能偏旧"用**虚线描边**表达，不动填充色。
+     早先是把填充降饱和 + 文字压灰，结果那一格看着像第五种配色 ——
+     次要维度（新鲜度）抢走了主维度（占用高低）的颜色通道，
+     第一个看到的人就问"这颜色怎么不一致"。次要信息该走别的通道。 */
+  .meter.dim { border-style: dashed; border-color: var(--grip); }
+
+  td.ctx { text-align: center; }
+
+  /* 底部状态栏：账号级额度 + hook 链路灯 + 开关提示。
+     这些都是**环境状态**（跨会话、不随选中行变），和顶栏"谁最需要你处理"
+     是两类信息 —— 混在一行会让顶栏既像仪表又像工具条，两边都读不干脆。
+     状态栏是这类环境信息的常规归处。 */
+  .statusbar {
+    flex: none; display: flex; align-items: center; gap: 14px;
+    padding: 5px 10px; border-top: 1px solid var(--chip-line); background: var(--bar-bg);
+    font-size: 12px; color: var(--fg);
+  }
+  /* 灯必须带标签。只放一颗裸的绿点，没人看得出它在说什么 ——
+     实测：第一个看到的人就问了"这个小绿点是做什么的"。 */
+  .hstat { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+  .sep { width: 1px; height: 12px; background: var(--chip-line); }
+  .usage { display: inline-flex; align-items: center; gap: 14px; }
+  .usage .u { display: inline-flex; align-items: center; gap: 5px; }
+  .usage .off { color: var(--muted); }
+
+  .detail { border-top: 1px solid var(--border); padding: 6px 10px 10px; }
   .detail .hint { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+
+  /* 选中行的元信息标签条。做成一行 chip 而不是表格：
+     这些字段是"扫一眼确认身份"用的，不需要对齐成表，占一行就够。
+     空值不渲染 —— 一排"未知"比没有更糟。 */
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 5px; min-height: 0; }
+  .meta:empty { display: none; }
+  .meta .chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--chip-bg); border: 1px solid var(--chip-line); border-radius: 10px;
+    padding: 1px 8px; font-size: 11px; color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .meta .chip i { font-style: normal; color: var(--muted); }
   .detail pre {
     margin: 0; height: 92px; overflow: auto; white-space: pre-wrap; word-break: break-word;
-    background: #fafafa; border: 1px solid #e5e5e5; padding: 6px; font: inherit;
+    background: var(--panel); border: 1px solid var(--panel-line); padding: 6px; font: inherit;
     user-select: text;
   }
   .empty { padding: 28px; text-align: center; color: var(--muted); }
+
+  /* ---- 帮助面板 ----
+     原来用 window.alert() 弹一整篇纯文本：不能排版、等宽字体挤成一坨、
+     还阻塞渲染线程（弹着的时候看板不刷新）。改成应用内面板，
+     顺带让图例直接复用真的柱子组件和数据层的状态配色。 */
+  .mask {
+    position: fixed; inset: 0; background: rgba(8,10,12,.55);
+    display: none; align-items: center; justify-content: center; z-index: 20;
+  }
+  .mask.on { display: flex; }
+  .sheet {
+    width: min(820px, 94vw); max-height: 88vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--bg); border-radius: 12px; box-shadow: 0 18px 60px rgba(0,0,0,.3);
+  }
+  .sheet header {
+    flex: none; display: flex; align-items: baseline; gap: 10px;
+    padding: 15px 22px 13px; border-bottom: 1px solid var(--panel-line);
+    background: var(--head-bg);
+  }
+  .sheet header h2 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .01em; }
+  .sheet header .sub { font-size: 12px; color: var(--muted); }
+  .sheet header .x {
+    margin-left: auto; border: 0; background: transparent; font-size: 16px;
+    line-height: 1; cursor: pointer; color: var(--muted); padding: 4px 6px; border-radius: 5px;
+  }
+  .sheet header .x:hover { color: var(--fg); background: var(--head-hover); }
+  /* 行距刻意压紧：窗口默认只有 620px 高，面板一屏能装多少直接决定要翻几页。
+     1.65 行距配 7px 单元格内边距时，光「状态」一节就占满一屏。 */
+  .sheet .body { flex: 1; overflow: auto; padding: 2px 22px 18px; line-height: 1.5; }
+
+  /* 小标题用左侧色条而不是全大写 —— 中文没有 uppercase，
+     靠字号和颜色区分层级在中文里区分度不够。 */
+  .sheet h3 {
+    margin: 16px 0 7px; padding-left: 9px; font-size: 12px; font-weight: 600;
+    color: var(--muted); border-left: 3px solid var(--track-line);
+  }
+  .sheet h3:first-child { margin-top: 12px; }
+  .sheet p.lead { margin: 0 0 8px; color: var(--fg); }
+
+  .sheet table { width: 100%; border-collapse: collapse; }
+  .sheet tr + tr td { border-top: 1px solid var(--line); }
+  .sheet td { padding: 4px 10px 4px 0; vertical-align: top; border: 0; }
+  /* 三列固定宽度：字形 / 名称 / 释义 —— 释义在整个面板里对齐到同一条竖线上，
+     左边缘参差是"看着乱"最主要的来源。 */
+  .sheet td.g { width: 22px; text-align: center; font-weight: 700; padding-right: 8px; }
+  .sheet td.k { width: 128px; font-weight: 600; color: var(--fg); }
+  .sheet td.d { color: var(--muted); }
+  .sheet .src td.k { width: 210px; font-weight: 400; color: var(--fg); }
+  .sheet .src td.d { color: var(--muted); }
+  .sheet code {
+    background: var(--chip-bg); border: 1px solid var(--chip-line); border-radius: 4px;
+    padding: 1px 5px; font-family: Consolas, "SF Mono", monospace; font-size: 12px;
+  }
+  kbd {
+    display: inline-block; min-width: 20px; text-align: center;
+    background: var(--chip-bg); border: 1px solid var(--track-line);
+    border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px;
+    font: inherit; font-size: 11px; color: var(--fg);
+  }
+  .swatches {
+    display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px;
+    background: var(--bar-bg); border: 1px solid var(--chip-line); border-radius: 8px; padding: 12px;
+  }
+  .swatches .s { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+  .swatches .s em { font-style: normal; font-size: 11px; color: var(--muted); }
+  .sheet .foot {
+    margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--panel-line);
+    font-size: 12px; color: var(--muted); white-space: pre-line;
+  }
+  /* 帮助页里的行内动作（如"点这里开启"）—— 用 button 而不是 a，
+     页面里没有导航概念，a[href] 还得防它真的跳走。 */
+  .linkbtn {
+    border: 0; background: transparent; padding: 0 2px; margin-left: 4px;
+    font: inherit; color: var(--link); text-decoration: underline; cursor: pointer;
+  }
 </style>
 </head>
 <body>
 
 <div class="bar">
-  <label><input type="checkbox" id="cbTop"> 置顶</label>
-  <label><input type="checkbox" id="cbSound" checked> 响铃</label>
-  <label><input type="checkbox" id="cbNotify" checked> 通知</label>
-  <label><input type="checkbox" id="cbFolded"> <span id="foldedLbl">显示全部</span></label>
-  <label><input type="checkbox" id="cbAuto"> 开机自启</label>
-  <span>排序
-    <select id="selSort">
-      <option value="0">需求度（谁最需要你）</option>
-      <option value="1">启动顺序</option>
-      <option value="2">最近活动</option>
-      <option value="3">项目名</option>
-    </select>
-  </span>
-  <button id="btnClear" title="把这三类隐藏起来，不删数据；它们下次有动静会自己回来">隐藏已完成/久候/已关闭</button>
-  <button id="btnHelp">?</button>
+  <span class="apptitle">会话看板</span>
+  <span class="sep"></span>
   <span class="stat" id="stat"></span>
+  <span class="offhint" id="offhint"></span>
+  <span class="grow"></span>
+  <span class="sorthint" id="sorthint"></span>
+  <button id="btnSettings" title="置顶 / 响铃 / 通知 / 显示已隐藏 / 开机自启 / 批量收起 / 用量显示设置">⚙ 设置</button>
+  <button id="btnHelp">?</button>
 </div>
 <div class="health" id="health"></div>
 
 <div class="wrap">
+  <!-- colgroup + thead 由 COLUMNS 描述表生成：列定义只有一份，
+       表头 / 列宽 / 单元格 / 排序键不会各说各话 -->
   <table>
-    <thead><tr>
-      <th style="width:110px">状态</th>
-      <th style="width:230px">会话标题</th>
-      <th style="width:250px">项目 / worktree</th>
-      <th style="width:90px" class="num">等你多久</th>
-      <th style="width:90px" class="num">本轮用时</th>
-      <th style="width:80px" class="num">静默</th>
-      <th style="width:90px" class="num">整体耗时</th>
-    </tr></thead>
+    <colgroup id="cg"></colgroup>
+    <thead><tr id="th"></tr></thead>
     <tbody id="tb"></tbody>
   </table>
   <div class="empty" id="empty" style="display:none">暂无会话</div>
@@ -96,19 +364,322 @@
 
 <div class="detail">
   <div class="hint">选中会话的最近一轮对话（双击 = 打开目录；右键 = 菜单；Delete = 隐藏这一条；Esc = 取消选择）：</div>
+  <div class="meta" id="meta"></div>
   <pre id="detail"></pre>
 </div>
 
+<div class="statusbar">
+  <span class="hstat" id="hstat"><span class="hdot" id="hdot"></span><span id="hlabel"></span></span>
+  <span class="sep"></span>
+  <span class="usage" id="usage"></span>
+</div>
+
+<div class="mask" id="mask">
+  <div class="sheet" id="sheet">
+    <header>
+      <h2>Claude 会话看板</h2>
+      <span class="sub">使用说明</span>
+      <button class="x" id="helpClose" title="关闭（Esc）">✕</button>
+    </header>
+    <div class="body" id="helpBody"></div>
+  </div>
+</div>
+
 <script>
+// 首帧数据到达前先按平台猜一下要不要自绘标题栏 ——
+// 否则启动瞬间顶栏会以"普通工具条"的样式渲染一下再跳成标题栏，看着像闪了一下。
+// 真值由主进程在第一帧里纠正（stats.overlay）。
+if (/Win|Mac/i.test(navigator.platform || '')) document.body.classList.add('overlay')
+
 const tb = document.getElementById('tb')
 const detail = document.getElementById('detail')
+const metaEl = document.getElementById('meta')
+
+// 取消选择时元信息要跟着清 —— 否则会留着上一行的 pid / 启动时刻，
+// 看着像"当前还选着某一行"。
+function clearDetail() {
+  detail.textContent = ''
+  metaEl.textContent = ''
+}
+
 let selected = null          // 当前选中的 sessionId
 let rowsById = new Map()     // sessionId -> 行数据
 let trById = new Map()       // sessionId -> <tr>，用于增量更新，避免整表重建
 
-const COLS = ['statusText', 'title', 'label', 'waitText', 'durText', 'silentText', 'lifeText']
+// ---- 列定义（单一信源）----
+//
+// 表头文字、列宽、单元格取值、排序键、悬停说明都在这一张表里。
+// 早先这些散在三处（HTML 里的 th、JS 里的 COLS 数组、硬编码的 CTX_COL 下标），
+// 加一列要改三处且顺序必须靠人对齐 —— 典型的会漂移的结构。
+//
+// sortKey：排序取的**原始值**字段，不是显示文本。按 '3m20s' 这种文本排序
+// 会得出 '10s' > '3m' 的荒谬结果。
+// dirDefault：第一次点这一列时先按哪个方向 —— 时长/占用类默认降序（大的在前，
+// 那才是你要找的），名字类默认升序。
+const COLUMNS = [
+  {
+    key: 'status', label: '状态', width: 110, cls: 'status',
+    get: (r) => r.statusText, sortKey: 'rank', dirDefault: 'asc',
+    tip: '按"有多需要你"分档。点击本列 = 按需求度排序（在问你 → 等你输入 → 已完成 → 运行中 …）',
+  },
+  {
+    key: 'title', label: '会话标题', width: 210,
+    get: (r) => r.title, sortKey: 'title', dirDefault: 'asc',
+    tip: '优先取 Claude Code 的会话标题（/resume 列表里那个）；没有就用你最近敲的那句',
+  },
+  {
+    key: 'label', label: '项目 / worktree', width: 236,
+    get: (r) => r.label, sortKey: 'label', dirDefault: 'asc',
+    tip: '该会话的工作目录名。同一目录开多个会话时会附会话 id 前 8 位区分',
+  },
+  {
+    key: 'ctx', label: '上下文', width: 86, cls: 'ctx',
+    get: (r) => r.ctxText, sortKey: 'ctxPct', dirDefault: 'desc',
+    tip: '已占用的上下文窗口比例。带 ~ 表示由 transcript 估算（未装 claude-hud 时的兜底），刻度可能有偏差；斜纹 = 拿不到数据（不是 0%）',
+  },
+  {
+    key: 'wait', label: '等你多久', width: 88, cls: 'num',
+    get: (r) => r.waitText, sortKey: 'wait', dirDefault: 'desc',
+    tip: '这一条从"球到你手上"到现在过了多久（仅在问你 / 等你输入 / 已完成时计时）',
+  },
+  {
+    key: 'dur', label: '本轮用时', width: 88, cls: 'num',
+    get: (r) => r.durText, sortKey: 'dur', dirDefault: 'desc',
+    tip: '运行中 = 本轮已经跑了多久；否则 = 上一轮跑了多久',
+  },
+  {
+    key: 'silent', label: '静默', width: 78, cls: 'num',
+    get: (r) => r.silentText, sortKey: 'silent', dirDefault: 'desc',
+    tip: '该会话的 transcript 多久没被写过，也就是多久没有任何产出。'
+      + '用来判断一个"运行中"是不是其实卡住了；超过 5 分钟且注册表不可用时标为「失联？」',
+  },
+  {
+    key: 'started', label: '启动时间', width: 96, cls: 'num',
+    get: (r) => clockText(r.startedMs) || '—', sortKey: 'startedMs', dirDefault: 'desc',
+    tip: '会话启动时刻（来自 Claude Code 的会话注册表）。默认排序就是按它升序 = 启动顺序',
+  },
+]
 
-function renderRows(rows) {
+const CTX_COL = COLUMNS.findIndex((c) => c.key === 'ctx')
+
+// 排序状态：col=null 表示默认排法（启动顺序，即 startedMs 升序）。
+// 点同一列循环 升 → 降 → 默认。
+let sortCol = null
+let sortDir = 'asc'
+
+// 百分比柱的配色分档。上下文占用与账号额度共用这一套。
+// 分档不等宽：低位一大档（30% 以下都算"随便用"），越靠满格切得越细
+// （75 / 90 两道线），因为决策压力集中在末段 —— 92% 和 78% 是两回事，
+// 而 12% 和 26% 没区别。
+//
+// 五档：绿 → 天蓝 → 黄 → 紫 → 红。
+//
+// 排序按"看上去有多重"递增，不是按色相环 —— 读者不该需要记住哪档更严重。
+// 紫（取自 claude-hud 的额度条配色）比黄更深更饱和，所以 黄 → 紫 → 红 仍然是
+// 递进的；早先 60–74 橙 / 75–89 黄 的版本才是回退，已改掉。
+//
+// 色值取 VS Code 深色主题的 ANSI 亮色 —— claude-hud 是终端输出，它那几根条子
+// 用的就是这一套（绿 #23d18b / 蓝 #3b8eea / 洋红 #d670d6）。
+// 注意：这是按"终端 ANSI 亮色"推出的对应值，不是从截图里取的像素。
+// 这套色本为深底设计，铺在看板的白底上必须降透明度，否则会晃眼。
+const METER_TIERS = [
+  // ≥90 是告警档，用饱和大红（不再是那档偏浅的 ANSI 亮红）。
+  // 代价是深红底上压不住深色数字 -> 这一档的数字翻白，见 .meter.crit。
+  { min: 90, color: 'rgba(214,25,25,.88)',   name: '大红' },
+  { min: 75, color: 'rgba(214,112,214,.55)', name: '洋红' },
+  { min: 60, color: 'rgba(240,200,40,.75)',  name: '黄' },
+  { min: 30, color: 'rgba(59,142,234,.52)',  name: '蓝' },
+  { min: 0,  color: 'rgba(35,209,139,.55)',  name: '绿' },
+]
+
+function meterColor(pct) {
+  for (const t of METER_TIERS) if (pct >= t.min) return t.color
+  return METER_TIERS[METER_TIERS.length - 1].color
+}
+
+function makeMeter() {
+  const m = document.createElement('span')
+  m.className = 'meter'
+  m.appendChild(document.createElement('i'))
+  m.appendChild(document.createElement('span'))
+  return m
+}
+
+// pct < 0 表示"拿不到"。此时画斜纹底 + '—'，而不是一条 0% 的空柱 ——
+// 空柱会被读成"0%，几乎没用"，那是把"不知道"呈现成"很安全"。
+function paintMeter(m, pct, text, dim) {
+  const fill = m.firstChild
+  const num = m.lastChild
+  const has = pct >= 0
+
+  m.classList.toggle('none', !has)
+  m.classList.toggle('dim', !!dim)
+  // 告警档（≥90）填充是饱和大红，数字必须翻白才读得清
+  m.classList.toggle('crit', has && pct >= 90)
+
+  const w = has ? pct + '%' : '0'
+  if (fill.style.width !== w) fill.style.width = w
+  const color = has ? meterColor(pct) : ''
+  if (fill.style.background !== color) fill.style.background = color
+
+  const t = String(text == null ? '—' : text)
+  if (num.textContent !== t) num.textContent = t
+}
+
+function buildCtxCell(td) {
+  td.appendChild(makeMeter())
+}
+
+function paintCtxCell(td, r) {
+  const pct = Number(r.ctxPct)
+  paintMeter(td.firstChild, pct, r.ctxText, r.ctxStale)
+  const tip = pct >= 0
+    ? (r.ctxTokensText + ' / ' + r.ctxWindowText + ' tokens'
+      + (r.ctxSource === 'transcript' ? '（transcript 估算，未走 claude-hud）' : '')
+      + (r.ctxStale ? '（快照已陈旧，可能低报）' : ''))
+    : '拿不到上下文用量'
+  if (td.title !== tip) td.title = tip
+}
+
+// ---- 表头：生成 + 排序 + 拖宽 ----
+
+const cgEl = document.getElementById('cg')
+const thEl = document.getElementById('th')
+const sortHintEl = document.getElementById('sorthint')
+let colWidths = {}   // key -> px，来自设置持久化
+
+function buildHead() {
+  cgEl.textContent = ''
+  thEl.textContent = ''
+  COLUMNS.forEach((c, i) => {
+    const col = document.createElement('col')
+    col.style.width = (colWidths[c.key] || c.width) + 'px'
+    cgEl.appendChild(col)
+
+    const th = document.createElement('th')
+    th.className = (c.cls === 'num' ? 'num' : '') + ' sortable'
+    th.dataset.key = c.key
+    const lab = document.createElement('span')
+    lab.textContent = c.label
+    th.appendChild(lab)
+    const arrow = document.createElement('i')
+    arrow.className = 'arrow'
+    th.appendChild(arrow)
+    th.title = c.tip + '\n\n点击排序：升序 → 降序 → 恢复默认（启动顺序）'
+    th.addEventListener('click', () => cycleSort(c.key))
+
+    // 拖宽把手。放在 th 右边缘，mousedown 时要阻止冒泡，
+    // 否则拖一下顺带触发了排序 —— 手感很差。
+    if (i < COLUMNS.length - 1) {
+      const grip = document.createElement('span')
+      grip.className = 'grip'
+      grip.addEventListener('mousedown', (e) => startResize(e, i))
+      grip.addEventListener('click', (e) => { e.stopPropagation() })
+      th.appendChild(grip)
+    }
+    thEl.appendChild(th)
+  })
+  paintHead()
+}
+
+function paintHead() {
+  for (const th of thEl.children) {
+    const active = th.dataset.key === sortCol
+    th.classList.toggle('sorted', active)
+    const arrow = th.querySelector('.arrow')
+    arrow.textContent = active ? (sortDir === 'asc' ? '▲' : '▼') : ''
+  }
+  const c = COLUMNS.find((x) => x.key === sortCol)
+  sortHintEl.textContent = c
+    ? ('按 ' + c.label + (sortDir === 'asc' ? ' 升序' : ' 降序'))
+    : '默认排序（启动顺序）'
+}
+
+// 升 → 降 → 默认。第三次点回到默认是刻意的：
+// 不给"退出排序"的出口，人就只能靠记忆去点回原来那一列。
+function cycleSort(key) {
+  const c = COLUMNS.find((x) => x.key === key)
+  if (!c) return
+  if (sortCol !== key) {
+    sortCol = key
+    sortDir = c.dirDefault || 'asc'
+  } else if (sortDir === (c.dirDefault || 'asc')) {
+    sortDir = sortDir === 'asc' ? 'desc' : 'asc'
+  } else {
+    sortCol = null
+    sortDir = 'asc'
+  }
+  window.board.setSetting('sortCol', sortCol || '')
+  window.board.setSetting('sortDir', sortDir)
+  paintHead()
+  renderRows(lastRows)
+}
+
+// 非默认排法下，久候 / 已关闭 / 已隐藏一律沉底 ——
+// 否则一个昨天开的死会话会仅仅因为"启动得早"或"静默最久"插到第一行。
+function sinkRank(r) {
+  return (r.eff === 'idle' || r.eff === 'closed' || r.eff === 'hidden') ? 1 : 0
+}
+
+function sortRows(rows) {
+  const out = rows.slice()
+  const c = COLUMNS.find((x) => x.key === sortCol)
+  const sign = sortDir === 'asc' ? 1 : -1
+
+  out.sort((a, b) => {
+    const s = sinkRank(a) - sinkRank(b)
+    if (s !== 0) return s
+    if (!c) {
+      // 默认：启动顺序（早的在前）。启动时刻未知的排最后而不是抢第一行。
+      return (a.startedMs || Number.MAX_SAFE_INTEGER) - (b.startedMs || Number.MAX_SAFE_INTEGER)
+    }
+    const av = a[c.sortKey]
+    const bv = b[c.sortKey]
+    let d
+    if (typeof av === 'string' || typeof bv === 'string') {
+      d = String(av == null ? '' : av).localeCompare(String(bv == null ? '' : bv))
+    } else {
+      d = (Number(av) || 0) - (Number(bv) || 0)
+    }
+    if (d !== 0) return d * sign
+    // 末位 tiebreak 用启动时刻（恒定值）—— 用 silent 之类会让行序每秒都在跳
+    return (a.startedMs || 0) - (b.startedMs || 0)
+  })
+  return out
+}
+
+// ---- 拖宽 ----
+
+function startResize(e, index) {
+  e.preventDefault()
+  e.stopPropagation()
+  const col = cgEl.children[index]
+  const key = COLUMNS[index].key
+  const startX = e.clientX
+  const startW = col.getBoundingClientRect().width
+
+  const onMove = (ev) => {
+    // 下限 48px：再窄就只剩省略号，等于把这一列废掉
+    const w = Math.max(48, Math.round(startW + ev.clientX - startX))
+    col.style.width = w + 'px'
+    colWidths[key] = w
+  }
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove)
+    document.removeEventListener('mouseup', onUp)
+    document.body.classList.remove('resizing')
+    window.board.setSetting('colWidths', colWidths)
+  }
+  document.addEventListener('mousemove', onMove)
+  document.addEventListener('mouseup', onUp)
+  document.body.classList.add('resizing')
+}
+
+let lastRows = []
+
+function renderRows(rowsIn) {
+  lastRows = rowsIn
+  const rows = sortRows(rowsIn)
   const want = new Set(rows.map(r => r.sessionId))
 
   // 删掉已经不在的行
@@ -121,25 +692,28 @@ function renderRows(rows) {
     if (!tr) {
       tr = document.createElement('tr')
       tr.dataset.id = r.sessionId
-      for (let c = 0; c < COLS.length; c++) {
+      for (let c = 0; c < COLUMNS.length; c++) {
         const td = document.createElement('td')
-        if (c === 0) td.className = 'status'
-        if (c >= 3) td.className = 'num'
+        const cls = COLUMNS[c].cls
+        if (cls) td.className = cls
+        if (cls === 'ctx') buildCtxCell(td)
         tr.appendChild(td)
       }
       trById.set(r.sessionId, tr)
     }
     // 只写变化的单元格。DOM 更新本来就是合成的，不会像 WinForms 那样整片重绘，
     // 但没必要做无谓的写入。
-    for (let c = 0; c < COLS.length; c++) {
-      const v = String(r[COLS[c]] == null ? '' : r[COLS[c]])
+    for (let c = 0; c < COLUMNS.length; c++) {
       const td = tr.children[c]
+      // 上下文列是结构化单元格（轨道 + 数字），不能走 textContent ——
+      // 那会把内部 DOM 冲掉，每帧重建一次进度条。
+      if (c === CTX_COL) { paintCtxCell(td, r); continue }
+      const v = String(COLUMNS[c].get(r) == null ? '' : COLUMNS[c].get(r))
       if (td.textContent !== v) td.textContent = v
-      if (c === 0 && td.style.color !== r.accent) td.style.color = r.accent
     }
-    if (tr.style.background !== r.back) tr.style.background = r.back
-    const fore = (r.eff === 'idle' || r.eff === 'closed' || r.eff === 'fresh' || r.eff === 'stalled' || r.eff === 'hidden') ? r.fore : ''
-    if (tr.style.color !== fore) tr.style.color = fore
+    // 行底色 / 状态文字色 / 压灰全部交给 CSS（按 data-eff 选择），
+    // 页面这里只负责把状态贴上去 —— 内联样式没法被主题覆盖。
+    if (tr.dataset.eff !== r.eff) tr.dataset.eff = r.eff
     tr.classList.toggle('sel', r.sessionId === selected)
 
     // 顺序就位：只有位置不对的才搬，不重建
@@ -149,13 +723,61 @@ function renderRows(rows) {
 
   rowsById = new Map(rows.map(r => [r.sessionId, r]))
   document.getElementById('empty').style.display = rows.length ? 'none' : 'block'
-  if (selected && !rowsById.has(selected)) { selected = null; detail.textContent = '' }
+  if (selected && !rowsById.has(selected)) { selected = null; clearDetail() }
+}
+
+// 一律带日期。会话经常跨天甚至挂好几天，只给 "08:57" 会被读成今早 ——
+// 省下的那 5 个字符不值得让人去猜是哪天。跨年时补上年份。
+function clockText(ms) {
+  if (!(ms > 0)) return ''
+  const d = new Date(ms)
+  const p2 = (n) => String(n).padStart(2, '0')
+  const md = (d.getMonth() + 1) + '/' + d.getDate()
+  const hhmm = p2(d.getHours()) + ':' + p2(d.getMinutes())
+  const y = d.getFullYear() !== new Date().getFullYear() ? (d.getFullYear() + '/') : ''
+  return y + md + ' ' + hhmm
+}
+
+// 元信息标签条。空值一律不渲染 —— 一排"未知"比没有更糟。
+function renderMeta(r, meta) {
+  metaEl.textContent = ''
+  const add = (k, v, tip) => {
+    if (v === '' || v == null) return
+    const chip = document.createElement('span')
+    chip.className = 'chip'
+    const kk = document.createElement('i')
+    kk.textContent = k
+    chip.appendChild(kk)
+    chip.appendChild(document.createTextNode(v))
+    if (tip) chip.title = tip
+    metaEl.appendChild(chip)
+  }
+
+  add('启动时间', clockText(r.startedMs), r.startedMs > 0
+    ? new Date(r.startedMs).toLocaleString() + '（会话注册表 startedAt）'
+    : '')
+  add('pid', r.pid > 0 ? String(r.pid) : '', '该会话的 claude 进程号')
+  // 标签已经写了"版本"，值再带 V 是重复；注册表里存的就是裸版本号（2.1.220）
+  add('CC 版本', r.ccVersion, 'Claude Code 版本')
+  // 入口两段拼一起：cli/interactive 比分成两个标签更省地方
+  const entry = [r.entrypoint, r.kind].filter(Boolean).join(' / ')
+  add('入口', entry, '从哪里启动的（entrypoint / kind）')
+  add('压缩', meta && meta.compactions >= 0 ? (meta.compactions + ' 次') : '',
+    '本会话 compact 过几次（来自 claude-hud 的 transcript 缓存；没装 hud 时不显示）')
 }
 
 async function showDetail(id) {
   const r = rowsById.get(id)
   if (!r) return
-  const ex = await window.board.getExchange(r.sessionId, r.transcript)
+  renderMeta(r, null)
+  // 两个 IPC 并行取，别串起来等
+  const [ex, meta] = await Promise.all([
+    window.board.getExchange(r.sessionId, r.transcript),
+    window.board.getSessionMeta(r.transcript),
+  ])
+  // 选中行在等待期间可能已经变了，避免把上一行的数据画上去
+  if (selected !== id) return
+  renderMeta(r, meta)
   // 「你」这一侧优先用 hook 抓的 last_prompt —— 那才是真正敲进去的原文。
   // transcript 里的 user 消息会混进 SKILL.md 正文、IDE 上下文等注入内容。
   const you = r.lastPrompt || ex.user || '（无）'
@@ -181,21 +803,24 @@ document.querySelector('.wrap').addEventListener('mousedown', (e) => {
   if (!e.target.closest('tr')) {
     selected = null
     for (const t of trById.values()) t.classList.remove('sel')
-    detail.textContent = ''
+    clearDetail()
   }
 })
 document.addEventListener('keydown', (e) => {
+  // 帮助面板开着时 Esc 先关它 —— 否则会一路穿透到"取消选择"，
+  // 面板还盖在上面，人会以为按键没反应。
+  if (e.key === 'Escape' && mask.classList.contains('on')) { closeHelp(); return }
   if (e.key === 'Escape') {
     selected = null
     for (const t of trById.values()) t.classList.remove('sel')
-    detail.textContent = ''
+    clearDetail()
   } else if (e.key === 'Delete' && selected) {
     // 已隐藏的行只在「显示全部」时才看得到，此时 Delete 当取消隐藏用 —— 同一个键来回切
     const r = rowsById.get(selected)
     if (r && r.hidden) { window.board.unhideRecord(selected); return }
     window.board.removeRecord(selected)
     selected = null
-    detail.textContent = ''
+    clearDetail()
   }
 })
 tb.addEventListener('contextmenu', (e) => {
@@ -215,91 +840,352 @@ tb.addEventListener('contextmenu', (e) => {
 })
 
 // ---- 顶部控件 ----
-const bind = (id, key, prop) => {
-  const el = document.getElementById(id)
-  el.addEventListener('change', () => window.board.setSetting(key, prop === 'value' ? Number(el.value) : el.checked))
-  return el
+//
+// 5 个开关 + 批量收起都搬进了 ⚙ 的原生菜单：它们全是"设一次就不动"的东西，
+// 常驻顶栏要占掉一整行（约 40px），而那一行本该归列表。
+// 用原生 checkbox 菜单项，一打开就能看见勾选状态 —— 收起来并不丢信息。
+// 留在外面的只有排序（改动频率明显更高）和帮助。
+// 排序改成点表头（升 → 降 → 默认），原来的下拉框已经移除 ——
+// 两套排序入口并存只会让人猜哪个说话。「需求度」那一档 = 点「状态」列。
+document.getElementById('btnSettings').addEventListener('click', () => window.board.showSettingsMenu())
+// ---- 帮助面板 ----
+
+const mask = document.getElementById('mask')
+const helpBody = document.getElementById('helpBody')
+let helpBuilt = false
+// 帮助页里需要每次打开都重算的几个格子（真实数据源状态 / 版本行）
+const liveCells = {}
+let footEl = null
+// 最近一帧的账号级用量，帮助页判断"5h/周 有没有启用"用
+let lastUsage = null
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag)
+  if (cls) e.className = cls
+  if (text != null) e.textContent = text
+  return e
 }
-const cbTop = bind('cbTop', 'alwaysOnTop')
-const cbSound = bind('cbSound', 'sound')
-const cbNotify = bind('cbNotify', 'notify')
-const cbFolded = bind('cbFolded', 'showFolded')
-const cbAuto = bind('cbAuto', 'autoLaunch')
-const selSort = bind('selSort', 'sort', 'value')
 
-document.getElementById('btnClear').addEventListener('click', () => window.board.clearStale())
-document.getElementById('btnHelp').addEventListener('click', () => {
-  alert(
-`【状态】按"有多需要你"分档
-  ？在问你   卡在 AskUserQuestion 等你作答，不理它就永远不会继续
-  ▲ 等你输入 空闲等待你的输入
-  ✔ 已完成   这一轮跑完了，球在你手上
-  ● 运行中   正在干活，不用管
-  ○ 空闲     会话开着但还没交互过
-  … 失联？   心跳静默超过 5 分钟（仅注册表降级时出现）
-  · 久候     超过 2 小时没被处理，默认不显示
-  ✕ 已关闭   进程已退出（按 pid 精确判定），默认不显示
-  · 已隐藏   你手动隐藏的，默认不显示；它下次有动静会自己回来
+function section(title) {
+  helpBody.appendChild(el('h3', null, title))
+  const t = el('table')
+  helpBody.appendChild(t)
+  return t
+}
 
-【排序】
-  需求度   上面的顺序，同档按冷落最久优先
-  启动顺序 按会话启动先后固定排列，位置不跳
-  最近活动 刚有动静的排前面
-  项目名   按 项目/worktree 字母序
-  非「需求度」排法下，久候 / 已关闭 / 已隐藏一律沉底
+function row(table, k, d) {
+  const tr = el('tr')
+  tr.appendChild(el('td', 'k', k))
+  tr.appendChild(el('td', 'd', d))
+  table.appendChild(tr)
+  return tr
+}
 
-【操作】
-  双击行  在文件管理器打开该会话的工作目录
-  右键    菜单（隐藏 or 取消隐藏 / 复制路径 / 打开目录）
-  Delete  隐藏这一条（不等于关会话；勾「显示全部」可找回，
-          该会话下次有动静会自己回到列表）；在已隐藏的行上按 = 取消隐藏
-  Esc     取消选择
+// 状态图例专用：字形单独占一列，名称染状态色，释义压深灰。
+// 染色走 .st-{eff} 类（与列表里同一份 CSS 变量），不用内联色 ——
+// 否则深色主题下图例仍是浅色主题那套色。
+function legendRow(table, s) {
+  const tr = el('tr')
+  const g = el('td', 'g st-' + s.eff, s.glyph)
+  const k = el('td', 'k st-' + s.eff, s.label)
+  tr.appendChild(g)
+  tr.appendChild(k)
+  tr.appendChild(el('td', 'd', s.desc))
+  table.appendChild(tr)
+}
 
-【数据来源】
-  会话清单 / 死活 / 忙闲  ← Claude Code 的活会话注册表 ~/.claude/sessions/<pid>.json
-  等你多久 / 本轮用时 / 摘要 / 标题 ← 本看板的 hook 记录
-  心跳                    ← 该会话 transcript 文件的修改时间`)
+async function buildHelp() {
+  // 状态图例向主进程取 —— 字形与配色都由数据层的状态表提供，
+  // 这里不再手抄一份（抄的那份改了不会同步，迟早变成过时的权威）。
+  let legend = []
+  try { legend = await window.board.statusLegend() } catch (_) { legend = [] }
+
+  const st = section('状态 · 按「有多需要你」从上到下排，这也是默认排序的顺序')
+  for (const s of legend) legendRow(st, s)
+
+  const so = section('排序 · 点表头')
+  row(so, '点一次 / 两次 / 三次', '升序 → 降序 → 恢复默认（启动顺序）。当前排法显示在右上角')
+  row(so, '点「状态」列', '就是原来的「需求度」排法：在问你 → 等你输入 → 已完成 → 运行中 …')
+  row(so, '点「上下文」列', '找出谁快撑满了（默认降序）')
+  row(so, '点「静默」列', '找出谁最久没产出 —— 一个"运行中"却静默很久的会话通常是卡住了')
+  row(so, '默认排法', '启动顺序（早的在前）；启动时刻未知的排最后，不抢第一行')
+  row(so, '沉底规则', '非默认排法下，久候 / 已关闭 / 已隐藏一律沉底，'
+    + '否则昨天的死会话会仅因"启动得早"或"静默最久"插到第一行')
+  row(so, '列宽', '拖表头之间的分隔处即可调整，会记住')
+
+  const op = section('操作')
+  row(op, '双击行', '在文件管理器打开该会话的工作目录')
+  row(op, '右键', '菜单：隐藏 or 取消隐藏 / 复制路径 / 打开目录')
+  const del = row(op, '', '隐藏这一条 —— 不等于关会话。在 ⚙ 设置里勾「显示已隐藏」可找回，'
+    + '而且该会话下次有动静会自己回到列表。在已隐藏的行上再按一次 = 取消隐藏')
+  del.firstChild.appendChild(el('kbd', null, 'Delete'))
+  const esc = row(op, '', '取消选择 / 关闭本面板')
+  esc.firstChild.appendChild(el('kbd', null, 'Esc'))
+  row(op, '⚙ 设置', '置顶 / 响铃 / 通知 / 显示已隐藏 / 开机自启 / 批量收起，'
+    + '以及「用量显示设置（5h / 周）」—— 顶部额度柱子的开启引导，随时能再打开')
+
+  helpBody.appendChild(el('h3', null, '柱子怎么读 · 上下文列与顶部额度共用同一套'))
+  helpBody.appendChild(el('p', 'lead', '百分比数字压在柱子里，颜色按占用高低分五档（越靠满格切得越细）：'))
+
+  // 图例直接渲染真的柱子组件：说明和实物不可能对不上
+  const sw = el('div', 'swatches')
+  const ranges = ['< 30%', '30–59%', '60–74%', '75–89%', '≥ 90%']
+  const samples = [15, 45, 68, 82, 95]
+  samples.forEach((pct, i) => {
+    const s = el('span', 's')
+    const m = makeMeter()
+    paintMeter(m, pct, pct + '%', false)
+    s.appendChild(m)
+    s.appendChild(el('em', null, ranges[i]))
+    sw.appendChild(s)
+  })
+  helpBody.appendChild(sw)
+
+  // 紧跟在色卡后面，不另起小标题 —— 它们讲的是同一个东西
+  const bar = el('table')
+  helpBody.appendChild(bar)
+  row(bar, '斜纹底 + —', '拿不到数据，不是 0%')
+  row(bar, '虚线描边', '快照可能偏旧、会低报（只对正在跑的会话判定；空闲会话上下文不变，旧值就是真相）')
+  row(bar, '余 xx', '顶部额度：距该窗口重置还剩多久')
+  row(bar, '~ 前缀', '上下文由 transcript 估算（未装 claude-hud 时的兜底），刻度可能有偏差')
+
+  const src = section('数据来源 · 带 ✓ / ⚠ 的是当前实际生效的路径')
+  src.className = 'src'
+  row(src, '会话清单 / 死活 / 忙闲', '← Claude Code 的活会话注册表 sessions/<pid>.json')
+  row(src, '等你多久 / 本轮用时 / 摘要 / 标题', '← 本看板的 hook 记录')
+  row(src, '心跳 / 静默', '← 该会话 transcript 文件的修改时间')
+  const ctxRow = row(src, '上下文占用', '')
+  const usageRow = row(src, '5h / 周用量', '')
+  liveCells.ctx = ctxRow.lastChild
+  liveCells.usage = usageRow.lastChild
+  liveCells.usageRow = usageRow
+
+  footEl = el('div', 'foot')
+  helpBody.appendChild(footEl)
+  helpBuilt = true
+}
+
+// 这两行必须每次打开都重算 —— 装上 hud、开启快照之后文案要跟着变，
+// 否则又变成"说明书替一个已经不成立的状态背书"。
+function refreshLiveHelp() {
+  if (!liveCells.ctx) return
+
+  // 上下文那行用**实际观测**：看当前这批行里 ctxSource 是什么，
+  // 而不是靠"hud 装没装"去推断。观测优于推断。
+  const sources = new Set([...rowsById.values()].map((r) => r.ctxSource).filter(Boolean))
+  let ctxText
+  if (sources.has('hud')) {
+    ctxText = '✓ 当前走 claude-hud 的每会话快照（context-cache），与 /context 一致'
+    if (sources.has('transcript')) ctxText += '；部分会话暂无快照，走 transcript 估算（显示带 ~）'
+  } else if (sources.has('transcript')) {
+    ctxText = '⚠ 当前走 transcript 末条 usage 估算（未装 / 未接 claude-hud），'
+      + '百分比分母是推的，显示带 ~'
+  } else {
+    ctxText = '暂无数据（没有可读的会话）'
+  }
+  liveCells.ctx.textContent = ctxText
+
+  liveCells.usage.textContent = ''
+  const u = lastUsage
+  if (u) {
+    liveCells.usage.textContent = '✓ 已启用，读 claude-hud 写出的 usage-snapshot.json。'
+      + '原始数据来自 Anthropic 官方接口，看板自己不联网、不读取任何凭据'
+      + (u.stale ? '（当前快照已超 10 分钟未更新）' : '')
+  } else {
+    liveCells.usage.appendChild(document.createTextNode('✗ 未启用，底部状态栏因此没有这两个数字。'))
+    const a = el('button', 'linkbtn', '点这里开启')
+    a.addEventListener('click', () => { window.board.openHudGuide() })
+    liveCells.usage.appendChild(a)
+  }
+
+  // 版本信息：发包给别人之后，对不上版本是最难查的一类问题
+  window.board.appInfo().then((info) => {
+    if (!info || !footEl) return
+    const t = info.codeMs ? new Date(info.codeMs).toLocaleString() : '未知'
+    footEl.textContent = '看板 v' + info.version + ' · Electron ' + info.electron
+      + ' · ' + info.platform + ' · 代码时间 ' + t
+      + '\n数据全部在本机读取：无网络出口、不读取任何凭据。'
+      + '路径按当前用户推导' + (info.configDirFromEnv ? '（已按 CLAUDE_CONFIG_DIR 覆盖）' : '')
+      + '：' + info.claudeDir
+  }).catch(() => { })
+}
+
+function openHelp() {
+  // buildHelp 是异步的（要向主进程取状态图例），首次打开必须等它建好格子
+  // 再去刷实时状态，否则 liveCells 还是空的。
+  if (!helpBuilt) buildHelp().then(refreshLiveHelp).catch(() => { })
+  else refreshLiveHelp()
+  mask.classList.add('on')
+}
+
+function closeHelp() { mask.classList.remove('on') }
+
+document.getElementById('btnHelp').addEventListener('click', openHelp)
+document.getElementById('helpClose').addEventListener('click', closeHelp)
+// 点遮罩空白处关闭，点面板内部不关
+mask.addEventListener('click', (e) => { if (e.target === mask) closeHelp() })
+
+// ---- 顶部账号级用量（5 小时窗 / 7 天窗）----
+
+// 距重置还剩多久。分钟零填充，否则 "3h2m" / "3h12m" 两帧之间宽度会跳。
+function untilText(ms) {
+  const left = ms - Date.now()
+  if (!(left > 0)) return '待刷新'
+  const h = Math.floor(left / 3600000)
+  const m = Math.floor((left % 3600000) / 60000)
+  if (h > 0) return h + 'h' + String(m).padStart(2, '0') + 'm'
+  return (m > 0 ? m : '<1') + 'm'
+}
+
+const usageEl = document.getElementById('usage')
+
+// 两个窗口的 DOM 建一次就复用：每帧重建 innerHTML 会让鼠标悬停的 tooltip
+// 每 1.5 秒被掀掉一次，读都读不完。
+const usageSegs = ['5h', '周'].map((name) => {
+  const wrap = document.createElement('span')
+  wrap.className = 'u'
+  const lbl = document.createElement('span')
+  lbl.textContent = name
+  const meter = makeMeter()
+  const left = document.createElement('span')
+  left.className = 'off'
+  wrap.appendChild(lbl)
+  wrap.appendChild(meter)
+  wrap.appendChild(left)
+  usageEl.appendChild(wrap)
+  return { wrap, meter, left }
 })
+const usageOff = document.createElement('span')
+usageOff.className = 'off'
+usageOff.textContent = '5h / 周用量：未启用（设置 → 用量显示设置）'
+usageEl.appendChild(usageOff)
+
+function renderUsage(u) {
+  // 拿不到就说明白为什么拿不到、以及去哪开 —— 留一片空白只会让人以为坏了。
+  const off = !u
+  usageOff.style.display = off ? '' : 'none'
+  for (const s of usageSegs) s.wrap.style.display = off ? 'none' : ''
+  if (off) {
+    usageEl.title = '这两个数字来自 Anthropic 官方 usage 接口，认证需要账号凭据。\n'
+      + '看板刻意不联网、不碰凭据，改为读 claude-hud 写出的快照文件。\n'
+      + '开启方式：⚙ 设置 → 用量显示设置（5h / 周）。'
+    return
+  }
+
+  const data = [u.fiveHour, u.sevenDay]
+  usageSegs.forEach((s, i) => {
+    const w = data[i]
+    if (!w) { s.wrap.style.display = 'none'; return }
+    paintMeter(s.meter, w.pct, w.pct + '%', u.stale)
+    // 重置倒计时放台面上，不塞 tooltip —— "还剩多少额度"和"多久后归零"
+    // 是同一个决策的两半：只看百分比没法判断该现在收手还是等一会儿。
+    const t = w.resetsAt ? '余' + untilText(w.resetsAt) : ''
+    if (s.left.textContent !== t) s.left.textContent = t
+  })
+
+  const tip = ['「余」= 距该窗口额度重置还剩多久']
+  if (u.fiveHour && u.fiveHour.resetsAt) tip.push('5 小时窗：' + u.fiveHour.pct + '%，' + new Date(u.fiveHour.resetsAt).toLocaleString() + ' 重置')
+  if (u.sevenDay && u.sevenDay.resetsAt) tip.push('7 天窗：' + u.sevenDay.pct + '%，' + new Date(u.sevenDay.resetsAt).toLocaleString() + ' 重置')
+  if (u.updatedAt) tip.push('快照更新于 ' + new Date(u.updatedAt).toLocaleTimeString())
+  if (u.stale) tip.push('（超过 10 分钟没更新 —— 所有会话都关掉时 hud 不再刷新它）')
+  usageEl.title = tip.join('\n')
+}
 
 // ---- 数据推送 ----
 let settingsApplied = false
+const offhint = document.getElementById('offhint')
+
 window.board.onRows(({ rows, stats, settings }) => {
+  // 首帧才应用持久化的排序与列宽：之后这两个由用户交互驱动，
+  // 每帧都套一遍会把正在拖的列宽按回旧值。
   if (!settingsApplied) {
-    cbTop.checked = !!settings.alwaysOnTop
-    cbSound.checked = !!settings.sound
-    cbNotify.checked = !!settings.notify
-    cbFolded.checked = !!settings.showFolded
-    cbAuto.checked = !!settings.autoLaunch
-    selSort.value = String(settings.sort || 0)
+    sortCol = settings.sortCol || null
+    sortDir = settings.sortDir === 'desc' ? 'desc' : 'asc'
+    // 持久化的列宽可能来自旧版本（列改过名），按当前 COLUMNS 过滤掉认不出的 key
+    colWidths = {}
+    const saved = settings.colWidths || {}
+    for (const c of COLUMNS) {
+      const w = Number(saved[c.key])
+      if (w >= 48 && w <= 900) colWidths[c.key] = w
+    }
+    if (sortCol && !COLUMNS.some((c) => c.key === sortCol)) sortCol = null
+    buildHead()
     settingsApplied = true
   }
 
+  // 开关收进菜单后唯一的可见性损失是"我是不是把提醒关了"。
+  // 常态（都开着）零占位，只有**关掉时**才在外面显示一行灰字 ——
+  // 与 health 同一个原则：正常无需发声，异常才占版面。
+  const offs = []
+  if (!settings.notify) offs.push('通知已关')
+  if (!settings.sound) offs.push('响铃已关')
+  if (settings.showFolded) offs.push('含已隐藏')
+  const oh = offs.join(' · ')
+  if (offhint.textContent !== oh) offhint.textContent = oh
+
+  // 标题栏是否自绘由主进程决定（Linux 不支持时退回系统标题栏）
+  document.body.classList.toggle('overlay', !!stats.overlay)
+
+  // 主题由主进程算好（auto 已经解析成 light/dark），这里只贴属性
+  const theme = stats.theme === 'dark' ? 'dark' : 'light'
+  if (document.documentElement.dataset.theme !== theme) {
+    document.documentElement.dataset.theme = theme
+  }
+
   renderRows(rows)
+  lastUsage = stats.usage || null
+  renderUsage(stats.usage)
 
-  let s = '活 ' + stats.live + ' · 待处理 ' + stats.needYou
-  if (stats.folded > 0) s += ' · 已隐藏 ' + stats.folded
-  document.getElementById('stat').textContent = s
-  document.getElementById('foldedLbl').textContent =
-    stats.folded > 0 ? ('显示全部 (' + stats.folded + ')') : '显示全部'
+  // 「待处理」是这个看板存在的理由本身，大于 0 时染色 ——
+  // 它该是视线第一个抓到的东西，而不是和其他计数一样的灰字。
+  let s = '活 <b>' + stats.live + '</b> · 待处理 '
+  s += stats.needYou > 0
+    ? '<b class="hot">' + stats.needYou + '</b>'
+    : '<b>0</b>'
+  if (stats.folded > 0) s += ' · 已折叠 ' + stats.folded
+  const statEl = document.getElementById('stat')
+  if (statEl.innerHTML !== s) statEl.innerHTML = s
 
+  // health：常态一颗绿灯 + 一句短标签（详情进 tooltip），warn 变黄灯换措辞，
+  // 只有 bad 才额外铺整行 —— hook 链路断了看板数据就不准，那种情况必须挡眼。
+  const dot = document.getElementById('hdot')
+  const hlabel = document.getElementById('hlabel')
+  const hstat = document.getElementById('hstat')
   const h = document.getElementById('health')
   if (stats.health && stats.health.length) {
-    h.className = 'health bad'
+    dot.className = 'hdot bad'
+    hlabel.textContent = 'hook 链路异常'
+    hstat.title = 'hook 链路异常：' + stats.health.join(' / ') + '\n重启看板会重新提示安装'
     h.textContent = 'hook 链路异常：' + stats.health.join(' / ') + '  → 重启看板会重新提示安装'
   } else if (!stats.regUsable) {
-    h.className = 'health warn'
-    h.textContent = 'hook 链路正常（4 个事件已注册） · 会话注册表不可用，已降级为 hook 推导（不再判定"已关闭"）'
+    dot.className = 'hdot warn'
+    hlabel.textContent = '注册表降级'
+    hstat.title = 'hook 链路正常（4 个事件已注册）\n'
+      + '但 Claude Code 的活会话注册表读不到，已降级为 hook 推导 —— 不再判定"已关闭"'
+    h.textContent = ''
   } else {
-    h.className = 'health'
-    h.textContent = 'hook 链路正常（4 个事件已注册） · 会话注册表可用，死活与忙闲以它为准'
-      + (stats.closed > 0 ? ('；已确认关闭 ' + stats.closed + ' 条（可点上方隐藏）') : '')
+    dot.className = 'hdot'
+    hlabel.textContent = 'hook 正常'
+    hstat.title = 'hook 链路正常（4 个事件已注册）\n会话注册表可用，死活与忙闲以它为准'
+      + (stats.closed > 0 ? ('\n已确认关闭 ' + stats.closed + ' 条（⚙ 设置里可批量收起）') : '')
+    h.textContent = ''
   }
 })
 
+// 通知点开：叫出窗口 + 选中那一行 + 滚到可见处。
+// 只有原生通知有这个回调；macOS 未签名走 osascript 兜底时点通知不会回到这里。
+window.board.onFocusRow((sid) => {
+  if (!sid || !rowsById.has(sid)) return
+  selected = sid
+  for (const [id, tr] of trById) tr.classList.toggle('sel', id === sid)
+  const tr = trById.get(sid)
+  if (tr && tr.scrollIntoView) tr.scrollIntoView({ block: 'nearest' })
+  showDetail(sid)
+})
+
 window.board.onError((msg) => {
-  const h = document.getElementById('health')
-  h.className = 'health bad'
-  h.textContent = '刷新出错：' + msg
+  document.getElementById('hdot').className = 'hdot bad'
+  document.getElementById('health').textContent = '刷新出错：' + msg
 })
 </script>
 </body>

@@ -5,8 +5,8 @@
   "main": "app/main.js",
   "scripts": {
     "start": "electron .",
-    "pack:win": "electron-packager . ClaudeBoard --platform=win32 --arch=x64 --out=dist --overwrite --asar=false --icon=app/icon.png --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/_last-payload|^/board-capture|^/frames)\"",
-    "pack:mac": "electron-packager . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/_last-payload|^/board-capture|^/frames)\""
+    "pack:win": "electron-packager . ClaudeBoard --platform=win32 --arch=x64 --out=dist --overwrite --asar=false --icon=app/icon.png --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/board-capture|^/frames)\"",
+    "pack:mac": "electron-packager . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/board-capture|^/frames)\""
   },
   "private": true,
   "devDependencies": {

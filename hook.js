@@ -41,7 +41,12 @@ const SUMMARY_MAX = 300
 // 早先这里用 __dirname。在源码目录跑时它恰好等于下面这个路径，所以本机没暴露；
 // 但打包后 __dirname 落在应用包内部（macOS 的 .app / Windows 的安装目录），
 // 那里通常只读，写 state 会静默失败。
-const BOARD_DIR = path.join(os.homedir(), '.claude', 'session-board')
+// 认 CLAUDE_CONFIG_DIR：用户挪过 .claude 时，看板那边也是这么推的，
+// 两边不同口径就会退化成"hook 往 A 写、看板从 B 读"。
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR
+  ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
+  : path.join(os.homedir(), '.claude')
+const BOARD_DIR = path.join(CLAUDE_DIR, 'session-board')
 const STATE_DIR = path.join(BOARD_DIR, 'state')
 
 function readStdin() {
@@ -72,7 +77,7 @@ function resolveTranscript(payload, sessionId) {
   if (given && fs.existsSync(given)) return given
   if (!sessionId) return ''
   try {
-    const projects = path.join(os.homedir(), '.claude', 'projects')
+    const projects = path.join(CLAUDE_DIR, 'projects')
     for (const dir of fs.readdirSync(projects)) {
       const candidate = path.join(projects, dir, sessionId + '.jsonl')
       if (fs.existsSync(candidate)) return candidate
@@ -206,9 +211,14 @@ function main() {
 
   // 首次运行留一份原始 payload，供事后核对字段名是否与预期一致
   // （平台改 hook 契约时，这是唯一的现场证据）。
+  //
+  // 只在文件还不存在时写 —— 原先没有这个判据，等于每次 hook 都覆写一份，
+  // 而 payload 里含 prompt 原文与 last_assistant_message，
+  // 结果是"一次性探针"变成了滚动累积的明文留痕，与注释声称的行为不符。
+  // 想重新取证：删掉对应的 _last-payload-*.json，下次事件会重新落一份。
   try {
     const probe = path.join(BOARD_DIR, '_last-payload-' + status + '.json')
-    fs.writeFileSync(probe, raw || '{}', 'utf8')
+    if (!fs.existsSync(probe)) fs.writeFileSync(probe, raw || '{}', 'utf8')
   } catch (_) { /* 探针写不了不影响主流程 */ }
 
   const sessionId = payload.session_id || ('unknown-' + process.pid)
