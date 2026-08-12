@@ -32,7 +32,13 @@ cd /d "%~dp0"
 echo.
 echo === Building macOS arm64 package ===
 echo.
-node "node_modules/electron-packager/bin/electron-packager.js" . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --ignore="(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/board-capture|^/frames)"
+node "node_modules/electron-packager/bin/electron-packager.js" . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --icon=app/icon.icns --ignore="(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/board-capture|^/frames)"
+echo.
+
+rem Put the distribution notes next to the .app -- the four install commands
+rem (tar -xzf / chmod +x / xattr) are undiscoverable from the UI, so the notes
+rem must land where unzipping puts them in plain sight.
+node "postpack.js"
 echo.
 
 rem Probe Info.plist rather than the .app directory itself: a bare directory
