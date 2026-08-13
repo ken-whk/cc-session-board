@@ -212,10 +212,16 @@ function detectHost(env) {
   if (env.TERMINAL_EMULATOR === 'JetBrains-JediTerm') return 'jetbrains'
   if (env.WT_SESSION) return 'wt'
   if (env.TERM_PROGRAM === 'mintty') return 'gitbash'
-  // 认不出的宿主原样记下来，别塞进 'console' 兜底 —— 那会把"没见过的终端"
-  // 和"确实是裸控制台"混成一档，以后加判据时无从分辨。
+  // macOS 两个常见宿主。判据本身很确定（都是各自官方设的 TERM_PROGRAM 值），
+  // 但本机是 Windows，没有样本实测 —— 呈现层按未实证标注。
+  if (env.TERM_PROGRAM === 'Apple_Terminal') return 'appleterminal'
+  if (env.TERM_PROGRAM === 'iTerm.app') return 'iterm'
+  // 认不出的宿主原样记下来，别塞进兜底档 —— 那会把"没见过的终端"和
+  // "确实没有任何指纹"混成一档，以后加判据时无从分辨。
   if (env.TERM_PROGRAM) return String(env.TERM_PROGRAM).toLowerCase().slice(0, 24)
-  return 'console'
+  // 没有任何指纹：Windows 上基本就是裸 conhost / cmd，可以这么说；
+  // 其他平台不能照搬 —— mac 上根本没有 cmd，标成 cmd 是明确的错。
+  return process.platform === 'win32' ? 'console' : 'unknown'
 }
 
 function writeAtomic(file, text) {

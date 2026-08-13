@@ -224,7 +224,12 @@ function hostMeta(host) {
     case 'gitbash':   return { badge: 'GB',   name: '独立 Git Bash 窗口（mintty）', unverified: false }
     case 'jetbrains': return { badge: 'IDEA', name: 'JetBrains 内置终端', unverified: true }
     case 'wt':        return { badge: 'WT',   name: 'Windows Terminal', unverified: true }
+    case 'appleterminal': return { badge: 'Term', name: 'macOS 终端（Terminal.app）', unverified: true }
+    case 'iterm':     return { badge: 'iTrm', name: 'iTerm2', unverified: true }
     case 'console':   return { badge: 'cmd',  name: '裸 cmd / conhost（无任何终端指纹）', unverified: true }
+    // 非 Windows 且没有任何指纹。不写死成某个终端名 —— 认不出就说认不出，
+    // 编一个具体名字（比如照搬 cmd）在别的平台上就是明确的错。
+    case 'unknown':   return { badge: '?',    name: '认不出的终端（没有任何指纹）', unverified: true }
     // 空字符串 = 这条 state 是加宿主字段之前写的，它下次有动静就会补上。
     // 与"认出来了但我们没见过"区分开：后者要把原代号显示出来，好知道该加什么判据。
     case '':

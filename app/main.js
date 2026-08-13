@@ -414,7 +414,8 @@ function folderCandidates(row) {
 }
 
 function focusSessionWindow(row, onDone) {
-  if (process.platform !== 'win32') { onDone({ ok: false, reason: 'unsupported' }); return }
+  const plat = process.platform
+  if (plat !== 'win32' && plat !== 'darwin') { onDone({ ok: false, reason: 'unsupported' }); return }
 
   // 请求走 UTF-8 文件而不是命令行参数：会话标题是中文，命令行传参要过控制台
   // 代码页，Windows 上会乱码（CLAUDE.md 铁律 3 是同一个根因的另一面）。
@@ -438,6 +439,24 @@ function focusSessionWindow(row, onDone) {
     onDone(res)
   }
 
+  // macOS：走 AppleScript。输出是 `ok=1 tier=tab app=Terminal` 这种扁平 kv，
+  // 不是 JSON —— AppleScript 拼 JSON 要处理引号转义，为三个字段不值当。
+  //
+  // 这条路径**未经实测**（本机是 Windows）。所以调用方把任何非 ok 的结果都当作
+  // "什么也没做"，退回打开目录 —— 即 macOS 在这个功能出现之前的行为。
+  // 猜错的代价被限制在"没变好"，不会"变坏"。
+  if (plat === 'darwin') {
+    const script = path.join(core.CODE_DIR, 'focus-window.applescript')
+    execFile('osascript', [script, reqFile], { timeout: 15000 }, (err, stdout) => {
+      const out = String(stdout || '').trim()
+      const ok = /(^|\s)ok=1(\s|$)/.test(out)
+      const tier = (out.match(/tier=(\w+)/) || [])[1] || ''
+      const proc = (out.match(/app=([\w \-.]+)/) || [])[1] || ''
+      onDone({ ok, reason: ok ? '' : ((out.match(/reason=(\w+)/) || [])[1] || (err ? 'error' : 'no_match')), tier, proc })
+    })
+    return
+  }
+
   // 快路径：生成好的 exe，几十毫秒。
   let hasExe = false
   try { hasExe = fs.statSync(FOCUS_EXE).isFile() } catch (_) { hasExe = false }
@@ -456,11 +475,43 @@ function focusSessionWindow(row, onDone) {
     { timeout: 15000, windowsHide: true }, done)
 }
 
+// macOS 取证：把当前所有 Terminal / iTerm 的标签名列出来，写进桌面文件并弹框告知。
+//
+// 存在的唯一理由是**这台开发机没有 Mac**：AppleScript 那条路径依赖一个没法在
+// Windows 上验证的假设（Claude 写的控制台标题能不能到 Terminal 标签名上）。
+// 与其反复猜，不如让用 Mac 的人点一下、把文件发回来。
+function diagnoseMacTerminals(parentWin) {
+  const reqFile = path.join(app.getPath('temp'), 'cc-board-focus-diag.txt')
+  const outFile = path.join(app.getPath('home'), 'Desktop', 'claude-board-mac-diag.txt')
+  try { fs.writeFileSync(reqFile, 'DIAG\n', 'utf8') } catch (_) { }
+  const script = path.join(core.CODE_DIR, 'focus-window.applescript')
+  execFile('osascript', [script, reqFile], { timeout: 20000 }, (err, stdout, stderr) => {
+    const body = String(stdout || '') + (stderr ? '\n--- stderr ---\n' + stderr : '')
+      + (err ? '\n--- error ---\n' + err.message : '')
+    let saved = outFile
+    try { fs.writeFileSync(outFile, body, 'utf8') } catch (_) { saved = '(写桌面失败)' }
+    dialog.showMessageBox(parentWin, {
+      type: 'info',
+      title: 'macOS 终端诊断',
+      message: '已导出到：\n' + saved + '\n\n把这个文件发回来即可。',
+      detail: body.slice(0, 1500),
+      buttons: ['知道了'],
+    })
+  })
+}
+
 // 成功不提示：窗口已经切过去了，再弹个框反而把焦点抢回来，等于把刚做成的事撤销一半。
 // 失败才说话，且要说清为什么 —— 静默失败会让人以为看板卡了。
 function focusWithFeedback(row, parentWin) {
   focusSessionWindow(row, (res) => {
     if (res.ok) return
+    // macOS 上的实现尚未实测，失败一律**静默退回打开目录**（该平台原本的双击行为），
+    // 不弹框 —— 弹一个"没找到窗口"只会让人以为看板坏了，而实际上是这条路径本来
+    // 就还没被验证过。等有人在 Mac 上验完，再考虑给它正常的报错。
+    if (process.platform === 'darwin') {
+      if (row.cwd) shell.openPath(String(row.cwd))
+      return
+    }
     const why = {
       no_match: '没找到对应的窗口。\n\n'
         + '可能原因：会话所在的终端已经关掉；或者它的宿主看板还认不出来'
@@ -476,7 +527,14 @@ function focusWithFeedback(row, parentWin) {
 }
 
 ipcMain.handle('board:focusWindow', (e, row) => {
-  if (row) focusWithFeedback(row, BrowserWindow.fromWebContents(e.sender))
+  if (!row) return true
+  // Windows / macOS 都走 focusWithFeedback；它内部对 macOS 的失败会静默退回
+  // 打开目录（该平台原本的双击行为），其他平台直接落到 unsupported 分支。
+  if (process.platform !== 'win32' && process.platform !== 'darwin') {
+    if (row.cwd) shell.openPath(String(row.cwd))
+    return true
+  }
+  focusWithFeedback(row, BrowserWindow.fromWebContents(e.sender))
   return true
 })
 
@@ -491,9 +549,16 @@ ipcMain.on('board:contextMenu', (e, row) => {
       : { label: '隐藏这一条', click: () => { core.removeRecord(row.sessionId); tick() } },
     { label: '复制目录路径', click: () => { if (row.cwd) clipboard.writeText(String(row.cwd)) } },
     { label: '打开目录', click: () => { if (row.cwd) shell.openPath(row.cwd) } },
-    ...(process.platform === 'win32' ? [{
+    ...((process.platform === 'win32' || process.platform === 'darwin') ? [{
       label: '切到该会话的窗口',
       click: () => focusWithFeedback(row, BrowserWindow.fromWebContents(e.sender)),
+    }] : []),
+    // macOS 专有的取证入口。那条路径没有 Mac 可实测，只能让真正用 Mac 的人
+    // 跑一次把现场发回来 —— 不给这个入口，远程排查就只能靠猜。
+    // 验完 macOS 分支后连同 focus-window.applescript 的 DIAG 分支一起删。
+    ...(process.platform === 'darwin' ? [{
+      label: '诊断：导出终端窗口清单（macOS 调试用）',
+      click: () => diagnoseMacTerminals(BrowserWindow.fromWebContents(e.sender)),
     }] : []),
   ])
   menu.popup({ window: BrowserWindow.fromWebContents(e.sender) })
