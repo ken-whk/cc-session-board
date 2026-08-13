@@ -374,7 +374,10 @@ ipcMain.handle('board:copyPath', (_e, dir) => { if (dir) clipboard.writeText(Str
 // 改动静默不生效。旧文件不清理，它只有几 KB。
 // v2：请求格式从 title/folder/host 改成 title/host/候选列表。不升版本号的话，
 // 装过 v1 的机器会拿旧 exe 去读新格式（把 host 当 folder），既不报错也不对。
-const FOCUS_EXE = path.join(core.INSTALL_DIR, 'cc-board-focuswin-v2.exe')
+// v3：同一档候选内改为「词边界命中优先于子串命中」。请求格式没变，所以旧 exe
+// 不会报错 —— 它只是继续按 z 序在 oteapi / oteapi-facade 之间乱挑，正是要修的症状。
+// 这种"格式兼容但行为不同"的改动最需要升号：不升就完全看不出来没生效。
+const FOCUS_EXE = path.join(core.INSTALL_DIR, 'cc-board-focuswin-v3.exe')
 
 // 在盒的 .NET Framework 编译器。Win10/11 一定有，路径固定；64 位优先。
 function cscPath() {

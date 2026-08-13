@@ -200,8 +200,6 @@
   tr[data-eff="waiting"] { background: var(--t-waiting); }
   tr[data-eff="done"]    { background: var(--t-done); }
   tr[data-eff="running"] { background: var(--t-plain); }
-  /* 「等子任务」跟运行中同待遇：都属于"它在干活，不用你管"那一类 */
-  tr[data-eff="subwork"] { background: var(--t-plain); }
   tr[data-eff="fresh"]   { background: var(--t-plain); }
   tr[data-eff="stalled"], tr[data-eff="idle"],
   tr[data-eff="closed"],  tr[data-eff="hidden"] { background: var(--t-dim); }
@@ -213,7 +211,6 @@
   tr[data-eff="waiting"] td.status, .st-waiting { color: var(--c-waiting); }
   tr[data-eff="done"]    td.status, .st-done    { color: var(--c-done); }
   tr[data-eff="running"] td.status, .st-running { color: var(--c-running); }
-  tr[data-eff="subwork"] td.status, .st-subwork { color: var(--c-running); }
   tr[data-eff="fresh"]   td.status, .st-fresh   { color: var(--c-fresh); }
   tr[data-eff="stalled"] td.status, .st-stalled { color: var(--c-stalled); }
   tr[data-eff="idle"]    td.status, .st-idle    { color: var(--c-idle); }

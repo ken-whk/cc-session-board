@@ -69,6 +69,44 @@ public static class FocusWindow
     // focus a browser or an Explorer window that merely has the repo name in its
     // title, so candidates are limited to processes that can host a terminal.
     // Names come from Process.ProcessName, which carries no ".exe" suffix.
+    // Is this character part of a "word" for boundary purposes? Hyphen and
+    // underscore count as word characters on purpose: project names are routinely
+    // joined with them ("oteapi-facade", "ote_api"), so treating them as separators
+    // would defeat the whole check.
+    private static bool IsWordish(char c)
+    {
+        return char.IsLetterOrDigit(c) || c == '-' || c == '_';
+    }
+
+    // Does `needle` occur in `hay` as a whole token, rather than merely as a substring?
+    //
+    // Why this exists: "oteapi" is a prefix of "oteapi-facade". With plain substring
+    // matching both windows match the candidate "oteapi", and the winner is then
+    // decided by z-order - so it silently focuses whichever project window you touched
+    // last instead of failing consistently. Measured on a real setup: two JetBrains
+    // project windows ("oteapi - ExternalController.java [oteapi]" and
+    // "oteapi-facade - OteClient.java") live in ONE idea64 process, so the pid cannot
+    // separate them either - the title is the only thing that can.
+    //
+    // Scans every occurrence, not just the first: the token-bounded hit may come later
+    // in the title (JetBrains repeats the module name in trailing brackets).
+    private static bool BoundedContains(string hay, string needle)
+    {
+        if (string.IsNullOrEmpty(hay) || string.IsNullOrEmpty(needle)) return false;
+        int from = 0;
+        while (from <= hay.Length - needle.Length)
+        {
+            int at = hay.IndexOf(needle, from, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) return false;
+            int end = at + needle.Length;
+            bool leftOk = at == 0 || !IsWordish(hay[at - 1]);
+            bool rightOk = end >= hay.Length || !IsWordish(hay[end]);
+            if (leftOk && rightOk) return true;
+            from = at + 1;
+        }
+        return false;
+    }
+
     private static string[] ProcNames(string kind)
     {
         switch (kind)
@@ -234,16 +272,33 @@ public static class FocusWindow
                     }
                     if (matched.Count == 0) continue;
 
+                    // Within one candidate tier, a token-bounded hit beats a plain
+                    // substring hit: "oteapi" must prefer "oteapi - Foo.java [oteapi]"
+                    // over "oteapi-facade - Bar.java". Without this the tie is broken by
+                    // z-order, i.e. it follows whichever window you last touched.
+                    //
+                    // Falling back to `matched` when nothing is bounded keeps every window
+                    // that used to be reachable reachable - this only ever re-ranks.
+                    var bounded = new List<Win>();
+                    foreach (var w in matched)
+                    {
+                        if (BoundedContains(w.Title, folder)) bounded.Add(w);
+                    }
+                    var pool = bounded.Count > 0 ? bounded : matched;
+
                     // Several windows at the same specificity: prefer one that is
                     // not minimized - a minimized window is more likely the one
                     // just parked than the one being returned to. All minimized
                     // falls back to z-order first.
-                    hit = matched[0];
-                    foreach (var w in matched)
+                    hit = pool[0];
+                    foreach (var w in pool)
                     {
                         if (!IsIconic(w.H)) { hit = w; break; }
                     }
-                    tier = "folder";
+                    // Distinct tier when it had to settle for a loose match: nothing
+                    // user-facing reads tier, but it is the only way to tell afterwards
+                    // whether the pick was principled or a z-order coin flip.
+                    tier = bounded.Count > 0 ? "folder" : "folder-loose";
                     break;
                 }
             }

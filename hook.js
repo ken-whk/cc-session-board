@@ -34,6 +34,9 @@ const TAIL_BYTES = 256 * 1024
 // 摘要截断长度：看板底部单行显示，过长无意义。
 const SUMMARY_MAX = 300
 
+// 后台任务快照最多留几条。元素形状还没有样本，条数封顶防止 state 无界增长。
+const BG_TASKS_MAX = 10
+
 // 看板和 hook 必须读写**同一个** state 目录，否则 hook 往 A 写、看板从 B 读，
 // 看板永远空着且不报错。做法是双方都固定用 home 下的同一路径 ——
 // 与 board-core.js 的 INSTALL_DIR 必须逐字一致。
@@ -219,6 +222,19 @@ function detectHost(env) {
   // 认不出的宿主原样记下来，别塞进兜底档 —— 那会把"没见过的终端"和
   // "确实没有任何指纹"混成一档，以后加判据时无从分辨。
   if (env.TERM_PROGRAM) return String(env.TERM_PROGRAM).toLowerCase().slice(0, 24)
+  // 没有终端指纹的情况必须再分一层：SDK 起的会话压根**没有自己的终端窗口**，
+  // 窗口归拉它起来的宿主程序（IDE / 编辑器 / 外部工具）所有。
+  //
+  // 判成 console 的代价是实测过的：切窗口那边把 host 当进程名白名单用
+  // （console -> conhost/cmd/powershell/OpenConsole），于是永远找不到宿主窗口、
+  // 报「会话窗口不存在」；而同一个宿主里另一条**没有 state**的记录，因为 host 为空
+  // 不触发过滤，反倒按标题/目录命中了 —— 表现为"该成的不成、不该成的成"。
+  // 判成 sdk 后走 C# 侧的 default 分支（空白名单 = 不过滤），才能命中宿主窗口。
+  //
+  // 只在没有终端指纹时才判：SDK 也可能是从真终端里起的，那时切到那个终端才对，
+  // 所以这一条必须留在所有 TERM_PROGRAM 判据**之后**。
+  // 实测样本只有 sdk-cli，用前缀兜住 sdk-* 的其他形态。
+  if (String(env.CLAUDE_CODE_ENTRYPOINT || '').startsWith('sdk')) return 'sdk'
   // 没有任何指纹：Windows 上基本就是裸 conhost / cmd，可以这么说；
   // 其他平台不能照搬 —— mac 上根本没有 cmd，标成 cmd 是明确的错。
   return process.platform === 'win32' ? 'console' : 'unknown'
@@ -240,6 +256,22 @@ function main() {
   try {
     if (raw) payload = JSON.parse(raw)
   } catch (_) { /* 非法 stdin -> 空 payload，仍然记一条，至少能看到有会话在动 */ }
+
+  // 空闲通知（Notification 且 notification_type=idle_prompt）不产生任何观测记录。
+  //
+  // Why：它**不是新事实**。轮次早在 Stop 时就结束了（state 那时已写成 done），
+  // 这条只是平台过一会儿提醒你"该回话了"。照单收下会一次丢掉三样东西：
+  //   ① 状态档 done -> waiting，「✔ 已完成」被冲成「▲ 等你输入」
+  //   ② summary 被覆盖成 "Claude is waiting for your input"，最后一条助手消息没了
+  //   ③ updated_ms 刷成通知时刻，「等你多久」从这一刻重新起算，系统性少算一段
+  //
+  // 按**白名单**挡，只挡这一个已实证的取值：等授权那类通知的 notification_type
+  // 本机还没有样本，认不出的取值一律沿用旧行为翻成「等你输入」——
+  // 宁可多叫你一次，不可漏掉真的卡在等授权。
+  //
+  // 代价（知情接受）：注册表整体读不到而降级到 legacyStatus 时，若 Stop 也没落地，
+  // 这一行会按 state 里残留的 running + 长静默显示「… 失联？」而不是「等你输入」。
+  if (status === 'waiting' && payload.notification_type === 'idle_prompt') return
 
   fs.mkdirSync(STATE_DIR, { recursive: true })
 
@@ -358,6 +390,19 @@ function main() {
     state.summary = msg || '等待你的输入'
     // 用时保持 done 时算出的值；若从 running 直接来（等授权），按当前时长算。
     if (!state.duration_ms) state.duration_ms = Math.max(0, now - state.turn_started_ms)
+  }
+
+  // 一次性取证：平台在 Stop 的 payload 里给的后台任务快照。
+  // **只落盘，不参与任何显示** —— 元素形状还没有样本（本机实测取值只见过 `[]`），
+  // 凭猜设计呈现会重演"扫 tasks/ 目录"那个永远误报在跑的坑（见 CLAUDE.md 已知硬限制）。
+  // 攒到真实取值后，这段要么接进显示、要么连同字段一起删，不许长期挂着。
+  //
+  // 刻意**不从 prev 沿用**：上面那个 state 对象逐字段显式构造，所以这个字段
+  // 下一个事件就自然消失。它是"Stop 那一刻的快照"，过期即失效正是想要的语义 ——
+  // 沿用才会让它变成一条永远说"还有后台活"的死信息。
+  if (Array.isArray(payload.background_tasks)) {
+    state.background_tasks = payload.background_tasks.slice(0, BG_TASKS_MAX)
+    state.background_tasks_truncated = payload.background_tasks.length > BG_TASKS_MAX
   }
 
   writeAtomic(file, JSON.stringify(state, null, 2))

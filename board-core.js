@@ -121,59 +121,116 @@ function fileMs(p) {
   try { return fs.statSync(p).mtimeMs } catch (_) { return 0 }
 }
 
-// 子任务（子代理 / 后台任务）判活窗口。
+// 子代理判活的兜底窗口。
 //
-// 比主循环的静默阈值短得多：这里要回答的是"此刻有没有人在替它干活"，
-// 而不是"卡了多久"。取 30 秒是因为子代理的输出比主循环稀疏 —— 一次工具调用
-// 可能十几秒不落盘，取太短会让计数一闪一闪。
-const SUBWORK_ACTIVE_MS = 30 * 1000
+// 它**不是**完成判据 —— 真正的完成判据是下面的完成通知，窗口只负责兜住
+// "通知还没注入 transcript"那一段（会话空闲时通知要等下次唤醒才注入）。
+//
+// 为什么不是原先的 30 秒：实测 189 份子代理记录，每份取它自身**最大**写入间隔，
+// p50=86s / p90=213s / p95=282s —— **95% 的子代理至少有一次间隔超过 30 秒**。
+// 30 秒窗口下绝大多数子代理都会中途掉出计数，现象是"明明开了 3 个只显示 2 个"、
+// 数字在 0/1/2/3 之间跳。10 分钟把这类漏报压到 3% 以下。
+const SUBWORK_ACTIVE_MS = 10 * 60 * 1000
 
-// 数这个会话此刻有多少子任务在动。
+// 找完成通知要读多少 transcript 尾巴。
+// 比 ASK_TAIL_BYTES 大一个量级：task-notification 记录里带整个 <result> 正文，
+// 一条就可能几十 KB，64KB 的尾巴装不下几条，会把更早的通知漏掉。
+const SUBWORK_TAIL_BYTES = 512 * 1024
+
+// 完成通知与子代理最后一次写入之间允许的时间差。
+// 实测两者到秒相等，留几秒余量是防"通知先落、文件后 flush"把已完成的又算回在跑。
+// 不敢再放大：放大等于把"被恢复后又开始跑"的那段一起吞掉。
+const SUBWORK_NOTIF_SKEW_MS = 5 * 1000
+
+// transcript -> Map<taskId, 最近一次「已完成」通知的时刻ms>。
+// 按 transcript mtime 记忆：空闲会话的 transcript 不变，不必每帧重读 512KB。
+const subworkDoneCache = new Map()
+function readTaskCompletions(tp) {
+  const mt = fileMs(tp)
+  const hit = subworkDoneCache.get(tp)
+  if (hit && hit.mtime === mt) return hit.map
+
+  const map = new Map()
+  const { text } = readTranscriptTail(tp, SUBWORK_TAIL_BYTES)
+  for (const line of (text ? text.split('\n') : [])) {
+    if (!line.includes('<task-notification>')) continue
+    if (!line.includes('<status>completed</status>')) continue
+    // 尾巴是从中间截断的，第一行往往不是合法 JSON —— 时间戳用正则取而不用
+    // JSON.parse，否则那条截断行里的通知会被整条丢掉。
+    const tsm = line.match(/"timestamp":"([^"]+)"/)
+    const at = tsm ? new Date(tsm[1]).getTime() : 0
+    if (!(at > 0)) continue
+    // 同一条记录理论上可含多个通知；平台也明说同一 task-id 可能通知多次
+    // （子代理可被恢复），所以取最新的那次。
+    const re = /<task-id>([^<]+)<\/task-id>/g
+    let m
+    while ((m = re.exec(line))) {
+      const id = m[1].trim()
+      map.set(id, Math.max(map.get(id) || 0, at))
+    }
+  }
+  subworkDoneCache.set(tp, { mtime: mt, map })
+  return map
+}
+
+// 数这个会话此刻有多少**子代理**在动。
 //
 // 为什么需要：看板的 4 个 hook 全是**主循环**事件（UserPromptSubmit / Stop /
-// Notification / SessionEnd），子代理和后台任务一个都不触发。结果是主循环一跑完
-// 就报「✔ 已完成」，而后台还在跑 —— 这比不显示更糟，它告诉你球在你手上，其实不是。
+// Notification / SessionEnd），子代理一个都不触发。主循环一跑完就报「✔ 已完成」
+// 而后台还在跑 —— 这比不显示更糟，它告诉你球在你手上，其实不是。
 //
-// 判据用 mtime，跟主循环拿 transcript mtime 当心跳是同一套手法，不引入新信源。
-// 两处产物，路径都从 transcript 推出来（slug 是它的父目录名），不另外猜：
+// 产物路径从 transcript 推出来（slug 是它的父目录名），不另外猜：
+//   projects/<slug>/<sessionId>/subagents/agent-<taskId>.jsonl
 //
-//   ① 子代理   projects/<slug>/<sessionId>/subagents/*.jsonl
-//   ② 后台任务 <temp>/claude/<slug>/<sessionId>/tasks/*        ← 只认非空文件
+// 判据两层，缺一不可：
+//   ① 窗口：该文件 mtime 在 SUBWORK_ACTIVE_MS 内（兜"通知还没注入"）
+//   ② 完成通知：transcript 里该 taskId **晚于**该文件最后一次写入的
+//      `<status>completed</status>` 通知 —— 有就是已结束，没有才算在跑
 //
-// ② 后台任务不能看文件本身，只能看 transcript 里这个 id 的记录。三条实测把
-// 所有"看文件"的判据都排除了：
-//   · 看 mtime —— `sleep 120` 这类静默任务中途一个字不输出，会被判成不活跃
-//     （现象：刚启动闪一下"1 个子任务"，之后消失）
-//   · 看 size>0 —— 前台调用留下的文件**也会有内容**（实测 59B），挡不住
-//   · 看"非空即在跑" —— tasks/ 里的文件任务结束后**不会被清理**
-//     （实测有 5.5 小时前的残留），会永远误报
+// ② 的**方向**是关键。曾经有个实现拿完成通知证明"还在跑"（登记过且没通知 = 在跑），
+// 那条路结构性地修不好：会话空闲时通知根本不会注入 transcript（要等下次唤醒），
+// 于是任务早就结束、看板还一直报在跑，已删除。这里方向是反的 ——
+// **只用通知证明"已完成"**：通知没注入就退回纯窗口兜底，最坏是多报一会儿，
+// 不会永远误报。同一份材料，换个方向用，坑就不成立。
 //
-// 能立住的只有 transcript：后台任务启动时 id 会写进去，完成时再落一条带
-// `task-notification` 的记录。**登记过且没有完成通知 = 还在跑。**
-// 前台调用的 id 从不进 transcript（输出走内联返回），天然被排除。
+// 也不能只留 ①：mtime 只说"最近写过字"，不说"还在跑" —— 跑完 mtime 就冻在那里，
+// 纯窗口会把刚结束的一批继续算成在跑。
+//
+// 别再试 tool_result 配对：后台 Agent 的 Task 调用**立即返回**，tool_result 在
+// spawn 那一刻就落了（实测 use->result 间隔 0.0s），它不是完成信号。
 //
 // 只给数量，不给内容 —— 要知道子任务在干什么就得读 agent jsonl 正文，
 // 成本和隐私都不划算，而"有几个在跑"已经足够回答"该不该切过去"。
-// 数这个会话此刻有多少**子代理**在动。
 //
-// 只管子代理。后台 shell 不在这里判 —— 注册表自己有 `status: "shell"`，
-// 是第一方数据（详见 buildRows 里 regStatus 的分支）。
-//
-// 曾经用"扫 tasks/ 目录 + 在 transcript 里找完成通知"来推后台任务，那条路
-// **结构性地修不好**：会话空闲时完成通知根本不会写进 transcript（要等下次
-// 唤醒才注入），于是任务早就结束、看板还一直报"在跑"。实测踩过，已删除。
-// 教训：先去看信源里有没有现成字段，再动手用间接证据重造一个。
+// 后台 shell 不在这里判：它没有 subagents 记录。第一方信源是 Stop payload 的
+// background_tasks，hook.js 已在落盘取证，暂不参与显示。
 function countActiveSubwork(tp, sessionId, now) {
   if (!tp || !sessionId) return 0
   const dir = path.join(path.dirname(tp), sessionId, 'subagents')
   let names = []
   // 绝大多数会话这个目录压根不存在，readdir 直接 ENOENT 返回，比先 exists 再读便宜
   try { names = fs.readdirSync(dir) } catch (_) { return 0 }
-  let n = 0
+
+  // 先过窗口筛候选：一个候选都没有就不必去读那 512KB 尾巴
+  const cand = []
   for (const nm of names) {
     if (!nm.endsWith('.jsonl')) continue
     const m = fileMs(path.join(dir, nm))
-    if (m > 0 && now - m < SUBWORK_ACTIVE_MS) n++
+    // 文件名去掉 agent- 前缀与扩展名 = 通知里的 <task-id>（实测一致）
+    if (m > 0 && now - m < SUBWORK_ACTIVE_MS) {
+      cand.push({ id: nm.replace(/\.jsonl$/, '').replace(/^agent-/, ''), ms: m })
+    }
+  }
+  if (!cand.length) return 0
+
+  const doneAt = readTaskCompletions(tp)
+  let n = 0
+  for (const c of cand) {
+    const at = doneAt.get(c.id) || 0
+    // 通知晚于（或基本等于）最后一次写入 -> 已结束。
+    // 被恢复后又开始跑的会产生更新的写入，于是这里重新把它算成在跑。
+    if (at > 0 && at >= c.ms - SUBWORK_NOTIF_SKEW_MS) continue
+    n++
   }
   return n
 }
@@ -190,16 +247,12 @@ function countActiveSubwork(tp, sessionId, now) {
 function statusMeta(status) {
   switch (status) {
     case 'asking':  return { rank: 0, text: '？ 在问你',  accent: '#D32F2F', back: '#FFF4F4', fore: '#222222', desc: '卡在 AskUserQuestion 等你作答，不理它就永远不会继续' }
-    case 'waiting': return { rank: 1, text: '▲ 等你输入', accent: '#E07C00', back: '#FFFAF1', fore: '#222222', desc: '空闲等待你的输入' }
+    // desc 刻意不再写"空闲等待你的输入"：采集层已把空闲催促那一类通知挡掉
+    // （hook.js 的 idle_prompt 守卫），所以现在能走到这一档的基本只剩等你授权。
+    // 说明必须跟着判据改，否则就是"看起来权威但已过时"的图例。
+    case 'waiting': return { rank: 1, text: '▲ 等你输入', accent: '#E07C00', back: '#FFFAF1', fore: '#222222', desc: '平台发来通知在等你处理，多数是等你授权 —— 轮次跑完后的空闲催促不进这一档，它仍显示「已完成」' }
     case 'done':    return { rank: 2, text: '✔ 已完成',   accent: '#2E7D32', back: '#F5FAF6', fore: '#222222', desc: '这一轮跑完了，球在你手上' }
     case 'running': return { rank: 3, text: '● 运行中',   accent: '#1565C0', back: '#FFFFFF', fore: '#222222', desc: '正在干活，不用管' }
-    // 主循环交出去了、但还有子代理 / 后台任务在跑。与 running 同 rank、同配色：
-    // 对"该切到哪去"而言它和运行中是一回事 —— 都不用你操作。
-    //
-    // 单列一档而不是沿用 waiting/done，是因为那两档会把它染成"待处理"橙/绿并排到
-    // 前面去，把你叫过去却无事可做（实测踩过：后台任务在跑，主循环空转触发了
-    // Claude Code 的空闲通知，看板照单收成「等你输入」）。
-    case 'subwork': return { rank: 3, text: '⧗ 后台任务', accent: '#1565C0', back: '#FFFFFF', fore: '#222222', desc: '主循环空闲，但后台 shell / 子代理还在跑 —— 不用你操作，它跑完会自己回来' }
     case 'fresh':   return { rank: 4, text: '○ 空闲',     accent: '#9E9E9E', back: '#FFFFFF', fore: '#909090', desc: '会话开着但还没交互过' }
     case 'stalled': return { rank: 5, text: '… 失联？',   accent: '#757575', back: '#FAFAFA', fore: '#909090', desc: '心跳静默超过 5 分钟（仅注册表降级时出现）' }
     case 'idle':    return { rank: 6, text: '· 久候',     accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0', desc: '超过 2 小时没被处理，默认不显示' }
@@ -226,6 +279,11 @@ function hostMeta(host) {
     case 'wt':        return { badge: 'WT',   name: 'Windows Terminal', unverified: true }
     case 'appleterminal': return { badge: 'Term', name: 'macOS 终端（Terminal.app）', unverified: true }
     case 'iterm':     return { badge: 'iTrm', name: 'iTerm2', unverified: true }
+    // Claude Agent SDK 起的会话（外部工具驱动，如挂在 IDE 里的助手）。
+    // 它没有自己的终端窗口，窗口归拉它起来的宿主程序所有 —— 所以切窗口那边
+    // 刻意不给它进程名白名单，退回"按标题/目录在所有窗口里找"才能命中宿主窗口。
+    // 有实测样本（CLAUDE_CODE_ENTRYPOINT=sdk-cli），所以不标未实证。
+    case 'sdk':       return { badge: 'SDK',  name: 'Claude Agent SDK 会话（无自己的终端窗口，归宿主程序）', unverified: false }
     case 'console':   return { badge: 'cmd',  name: '裸 cmd / conhost（无任何终端指纹）', unverified: true }
     // 非 Windows 且没有任何指纹。不写死成某个终端名 —— 认不出就说认不出，
     // 编一个具体名字（比如照搬 cmd）在别的平台上就是明确的错。
@@ -242,7 +300,7 @@ function hostMeta(host) {
 // 帮助面板的状态图例。顺序 = rank 顺序 = 「需求度」排序的顺序，
 // 所以图例本身就解释了默认排法。
 function statusLegend() {
-  return ['asking', 'waiting', 'done', 'running', 'subwork', 'fresh', 'stalled', 'idle', 'closed', 'hidden']
+  return ['asking', 'waiting', 'done', 'running', 'fresh', 'stalled', 'idle', 'closed', 'hidden']
     .map((eff) => {
       const m = statusMeta(eff)
       // 字形与文字拆开给界面：图例里字形要单独占一列才能对齐
@@ -434,6 +492,20 @@ function ctxFromTranscript(transcriptPath, windowDefault) {
       (Number(u.cache_read_input_tokens) || 0)
     if (!(tokens > 0)) continue
 
+    // windowDefault < 0 = 调用方明确告知"这个会话的窗口没有任何可用证据"。
+    //
+    // 只有一种情形会这样：SDK 会话的模型由**宿主**选，你的 settings.json 说明不了它
+    // （实测：CodeMoss 起的会话跑 claude-opus-4-8 = 200k，而 settings 是 opus[1m]，
+    //  于是 167k 被按 1M 算成 17%，真实约 84% —— 把"快撑满了"显示成"很安全"，
+    //  这是往危险方向错，比不显示糟得多）。
+    //
+    // 这时只报 token 数、pct 给 -1，界面那一格因此只显示数字不画柱子
+    // （paintMeter 对 pct<0 正好就是这个行为，不需要改渲染层）。
+    // token 数本身是精确的：它来自 API 自己的记账，公式与 hud 一致（都不含 output）。
+    if (windowDefault < 0) {
+      return { pct: -1, tokens, windowSize: 0, savedAt: fileMs(transcriptPath), source: 'transcript' }
+    }
+
     // 观测反推：这次请求既然成功了就没有溢出，所以窗口至少装得下已观测到的
     // token 量。settings.json 猜小了（会话单独切过 1M 模型）时靠这一层纠回来。
     let windowSize = windowDefault > 0 ? windowDefault : 200000
@@ -476,6 +548,59 @@ function readSessionMeta(transcriptPath) {
 
 // 账号级用量快照。读不到就返回 null，界面整块不显示 ——
 // 不用 0% 冒充"还没用"，那是把"不知道"呈现成"很安全"。
+// 用量快照的"同窗口内只增不减"高水位。
+//
+// 为什么需要：那个快照是**所有会话共用一个文件**，而数字并不是 hud 自己去调 API 取的，
+// 是 Claude Code 通过 statusline 的 stdin 喂给**每个会话**的 rate_limits。空闲已久的
+// 会话手里还是它最后一次跟 API 通话时的旧值，而它的 statusline 每 ~300ms 照样在渲染，
+// 于是把旧值连同一个**新鲜的 updated_at** 写回去。
+// 实测两个会话把 5h 在 31% / 18% 之间来回覆盖，周期 2–5 秒，进度条肉眼可见地跳。
+// （上游 external-usage.ts 的 30 秒节流只负责"强制写"、不负责"抑制写" ——
+//   内容一不同就立刻写，多会话打架时节流形同不存在。）
+//
+// 所以**不能**"以 updated_at 更晚的为准"—— 每个写入方都自称最新。
+// 能立住的是配额窗口语义：同一个窗口（resets_at 相同）内用量只增不减，
+// 落后的会话必然报更小的数，于是**更大的那个就是更新的那个**。这是推论，不是偏好。
+//
+// 四条规则，①④ 两条都在治窗口重置边界 —— 重置后落后会话还会写旧窗口的数：
+//   ① 快照的 resets_at 比记录里的更旧 -> 整条忽略（连 resets_at 一起用记录里的，
+//      否则界面上那个"余 Xh"倒计时会跟着一起跳）
+//   ② 同一窗口 -> 取见过的最大 used_percentage
+//   ③ resets_at 前进 -> 换了窗口，清零重新开始
+//   ④ resets_at **已经是过去时** -> 这个百分比属于一个已经作废的窗口，返回 null
+//      不显示。没有 ④ 的话会出现：窗口早已重置、真实用量归零，而唯一还在写的
+//      落后会话报着旧窗口的 70%，进度条就一直挂着 70% —— 而条形本身没有任何
+//      "陈旧"提示（stale 只出现在帮助面板文案里），纯误导。界面对"某个窗口没数据"
+//      是有优雅处理的：那一段直接不渲染。认不出就说认不出，比显示个权威的错数好。
+//
+// 只放内存、不落盘：看板重启后水位丢了，但下一次有会话写新值就自己回来 ——
+// 为一个显示项新增一个状态文件不值得。
+//
+// 水位只记**读到过**的值：两次刷新之间的峰值它看不见。刷新是 1.5s 一次而写入更密，
+// 所以最坏情况只是真实上涨晚一帧显示，不会显示错的数。
+const usageHighWater = new Map()
+function applyUsageHighWater(key, win, now) {
+  // 没有 resets_at 就识别不出窗口 —— 不敢压，否则某个值会永远卡住且没有复位的口子
+  if (!win || !(win.resetsAt > 0)) return win
+
+  let mark = usageHighWater.get(key)
+  // 记录自己的窗口已经过期 -> 丢掉。不能拿一个作废窗口的高水位去压新窗口的数据。
+  if (mark && mark.resetsAt <= now) { usageHighWater.delete(key); mark = null }
+
+  const held = mark ? { pct: mark.pct, resetsAt: mark.resetsAt } : null
+
+  // ④ 报的是已经作废的窗口 -> 有有效记录就用记录，否则宁可不显示
+  if (win.resetsAt <= now) return held
+  // ① 比记录更旧的窗口 -> 整条忽略
+  if (mark && win.resetsAt < mark.resetsAt) return held
+  // ② 同一窗口内只增不减
+  if (mark && win.resetsAt === mark.resetsAt && win.pct < mark.pct) return held
+
+  // ③ 窗口前进 / 首次见到 / 数值上涨 -> 换水位
+  usageHighWater.set(key, { pct: win.pct, resetsAt: win.resetsAt })
+  return win
+}
+
 function readUsageWindows() {
   let o
   try {
@@ -493,8 +618,9 @@ function readUsageWindows() {
       resetsAt: Number.isFinite(resetsAt) ? resetsAt : 0,
     }
   }
-  const fiveHour = win('five_hour')
-  const sevenDay = win('seven_day')
+  const now = Date.now()
+  const fiveHour = applyUsageHighWater('five_hour', win('five_hour'), now)
+  const sevenDay = applyUsageHighWater('seven_day', win('seven_day'), now)
   if (!fiveHour && !sevenDay) return null
   const updatedAt = o.updated_at ? Date.parse(o.updated_at) : 0
   return {
@@ -503,7 +629,7 @@ function readUsageWindows() {
     updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0,
     // hud 每次渲染 statusline 才刷（30s 节流）；全部会话都关掉时它就不再更新，
     // 所以要让界面能把"陈旧"说出来，而不是把过期数字当现值展示。
-    stale: !updatedAt || (Date.now() - updatedAt) > 10 * 60 * 1000,
+    stale: !updatedAt || (now - updatedAt) > 10 * 60 * 1000,
   }
 }
 
@@ -773,12 +899,10 @@ function buildRows(opts) {
       eff = 'asking'
     } else if (regStatus === 'busy') {
       eff = 'running'
-    } else if (regStatus === 'shell') {
-      // 注册表的第三种状态：主循环空闲，但还有后台 shell 在跑（run_in_background）。
-      // 这是第一方数据，别再用"扫 tasks/ 目录猜"那一套 —— 那条路在会话空闲时
-      // 拿不到完成通知，会把早已结束的任务一直报成在跑。
-      eff = 'subwork'
-    } else if (regStatus === 'idle') {
+    } else if (regStatus === 'idle' || regStatus === 'shell') {
+      // `shell` = 主循环空闲、但还有后台 shell 在跑（run_in_background）。
+      // 与 `idle` 同路：状态档只反映**主循环**把球交给了谁，后台工作一律不改档，
+      // 只在 statusText 里追加「· N 个子任务」后缀（见下方）。
       if (!st) eff = 'fresh'
       else if (String(st.status) === 'waiting') eff = 'waiting'
       else if (String(st.status) === 'running') eff = 'done'
@@ -801,19 +925,15 @@ function buildRows(opts) {
         : (Number(st.duration_ms) || 0)
     }
 
-    // 子代理计数与改判必须放在 baseEff 定格**之前**：
-    // 顶部那个"待处理 N"走的是 baseEff，晚一步的话状态是改对了、计数却照旧催你。
+    // 此刻在动的子代理数。只喂 statusText 的后缀，**不参与状态改判** ——
+    // 状态档、配色、排序权重一律只由主循环决定（在问你 / 等你输入 / 已完成 / 运行中）。
+    //
+    // 曾经有过一档「⧗ 后台任务」：主循环交还但还有子代理 / 后台 shell 在跑时改判成它，
+    // 与运行中同 rank 同配色，好处是不会把你叫过去做无事可做的事。**已按明确要求撤掉** ——
+    // 看板的第一职责是"主线程现在把球交给谁了"，多一档会把这个判断搅浑。
+    // 代价（知情接受）：后台还在跑的行照样显示「等你输入 / 已完成」并排到前面来，
+    // 有没有人在替它干活只能靠后缀读出来。想改回去先确认这是不是又要那一档。
     const subCount = (eff === 'closed' || eff === 'hidden') ? 0 : countActiveSubwork(tp, id, now)
-
-    // 主循环已交还（等你输入 / 已完成）但还有子代理在跑 -> 同样归到「后台任务」。
-    //
-    // 后台 shell 那一档已经由注册表的 status:"shell" 覆盖，这里兜的是**后台子代理**
-    // —— 它不改注册表状态，只能靠子代理记录的 mtime 看出来。
-    //
-    // 不改判的话，这一行会顶着"待处理"的橙 / 绿排在前面把你叫过去，而你到了什么也
-    // 做不了 —— 真正在等的是那个子任务，不是你。
-    // 「在问你」不参与改判：那是真的卡住等你作答，有没有子任务都得你回。
-    if (subCount > 0 && (eff === 'waiting' || eff === 'done')) eff = 'subwork'
 
     // 隐藏判定放在所有派生值算完之后 —— 勾「显示全部」时那些数值还要照常显示。
     // 复活条件：这个会话在隐藏之后又有过 hook 事件（updated_ms 变新）。
@@ -857,9 +977,24 @@ function buildRows(opts) {
 
     const meta = statusMeta(eff)
 
-    // 宿主只有 state 一个信源（注册表不记它）。所以刚开还没交互过的会话没有徽标，
-    // 等它第一次触发 hook 才补上 —— 这跟标题的补齐节奏一致，不额外解释。
-    const hostRaw = (st && st.host) ? String(st.host) : ''
+    // 宿主的**具体终端**只有 state 一个信源（注册表不记它）。所以刚开还没交互过的
+    // 会话没有徽标，等它第一次触发 hook 才补上 —— 跟标题的补齐节奏一致。
+    //
+    // 但"有没有自己的终端窗口"这件事不必等 hook：注册表的 entrypoint 是第一方数据，
+    // 会话一注册就有。所以 state 的**兜底档**由它接管 —— `console` 是 hook 认不出
+    // 任何终端指纹时的兜底值，SDK 起的会话压根没有自己的终端窗口，不能按裸 cmd 处理
+    // （否则切窗口那边只在 conhost/cmd/powershell 里找，永远找不到宿主窗口）。
+    //
+    // Why 必须在这里而不是只靠 hook.js 的 detectHost：detectHost 写下的值要等
+    // **下一次 hook 事件**才更新，于是判据改对了、存量会话却还挂着旧结论（实测踩过：
+    // 改完 detectHost 后那一行仍报「会话窗口不存在」，因为它当时没再触发过 hook）。
+    // 两处都留：这里让存量与无 state 的会话立刻正确，detectHost 让 state 自身不说谎
+    // （注册表整体读不到而降级时只剩 state 可用）。
+    //
+    // 不覆盖真实指纹（vscode / gitbash 等）：SDK 从真终端里起时，切到那个终端才对。
+    let hostRaw = (st && st.host) ? String(st.host) : ''
+    const regEntrypoint = (rg && rg.entrypoint) ? String(rg.entrypoint) : ''
+    if ((!hostRaw || hostRaw === 'console') && regEntrypoint.startsWith('sdk')) hostRaw = 'sdk'
     const hostInfo = hostMeta(hostRaw)
 
     // 状态文字的后缀。两个信号互斥，按下面的优先级二选一 —— 它们回答的是同一个
@@ -877,10 +1012,7 @@ function buildRows(opts) {
     // 措辞沿用「静默」这一个词，不引入"停滞/卡住"等第二种说法 ——
     // 它陈述事实（多久没产出），不替人下"已经死了"的判断。
     let statusText = meta.text
-    if (eff === 'subwork') {
-      // 后台 shell 那一档拿不到个数（注册表只说有没有），所以没数就不写数
-      if (subCount > 0) statusText += ' · ' + subCount + ' 个子代理'
-    } else if (subCount > 0) {
+    if (subCount > 0) {
       statusText += ' · ' + subCount + ' 个子任务'
     } else if (eff === 'running' && hasBeat && silent > SILENT_STALL_MS) {
       statusText += ' · 静默 ' + formatDuration(silent)
@@ -892,7 +1024,17 @@ function buildRows(opts) {
     // 空闲 / 等你输入 / 在问你 / 已关闭的会话上下文根本没在变，
     // 最后一次快照就是当前真相，不该灰显（阻塞会话的 statusline 不再渲染，
     // 快照必然变旧，按时间一刀切会把这些行全打成"不可信"）。
-    const ctx = readContextUsage(tp, ctxWindowDefault)
+    // SDK 会话的模型由宿主选，settings.json 的窗口对它不是证据 -> 传 -1，
+    // 让兜底路径只报 token 数、不编百分比（详见 ctxFromTranscript）。
+    //
+    // 作用面刻意收窄到**这一种**会话：CLI 会话即便暂时没有 hud 快照（刚开、或压根没装
+    // hud），settings 的窗口对它仍然成立 —— 一并砍掉百分比会让没装 hud 的机器整块退化。
+    // 注册表读不到时 regEntrypoint 为空串、判据不成立，于是沿用旧行为，而不是因为
+    // "认不出"就把百分比抹掉。
+    //
+    // 只影响兜底路径：hud 有该会话的快照时 ctxFromHud 先返回，这个参数根本用不到。
+    const ctxWindow = regEntrypoint.startsWith('sdk') ? -1 : ctxWindowDefault
+    const ctx = readContextUsage(tp, ctxWindow)
     const ctxGrowing = (eff === 'running' || eff === 'stalled')
     const ctxStale = !!(ctx && ctxGrowing && ctx.savedAt > 0 && (now - ctx.savedAt) > CTX_STALE_MS)
 
@@ -901,8 +1043,14 @@ function buildRows(opts) {
       cwd,
       transcript: tp,
       ctxPct: ctx ? ctx.pct : -1,
-      // transcript 兜底算出来的百分比刻度依赖猜窗口大小，标 ~ 提示是近似值
-      ctxText: ctx ? ((ctx.source === 'transcript' ? '~' : '') + ctx.pct + '%') : '—',
+      // transcript 兜底算出来的百分比刻度依赖猜窗口大小，标 ~ 提示是近似值。
+      // pct < 0 = 窗口没有证据（见 ctxWindow）：改显示精确的 token 数 ——
+      // 拿得到的那半边如实给出来，比为了凑一个百分比去借无关的分母好。
+      ctxText: ctx
+        ? (ctx.pct >= 0
+          ? ((ctx.source === 'transcript' ? '~' : '') + ctx.pct + '%')
+          : formatTokens(ctx.tokens))
+        : '—',
       ctxTokensText: ctx ? formatTokens(ctx.tokens) : '—',
       ctxWindowText: ctx && ctx.windowSize ? formatTokens(ctx.windowSize) : '—',
       ctxSource: ctx ? ctx.source : '',
