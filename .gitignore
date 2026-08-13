@@ -3,20 +3,29 @@
 #   state/*.json          各会话的 cwd（含公司内部项目路径与需求代号）、标题、
 #                         你敲过的原话、助手回复摘要
 #   _last-payload-*.json  hook 收到的原始 payload，含 prompt 原文与最后一条回复
+#   _env-probe.json       hook 进程的终端指纹 env 取证（含 cwd 与 env 键名全集）
 #   hidden.json           你隐藏了哪些会话（session id）
 #   ui*.json              窗口位置与勾选项
 state/
 _last-payload-*.json
+_env-probe.json
 hidden.json
 ui*.json
 board-capture*.png
 frames/
 
 # ---- 构建产物与依赖 ----
+# cc-board-focuswin-*.exe 是首次运行时由 focus-window.cs 现编出来的助手，
+# 落在 INSTALL_DIR（本机恰好等于仓库目录）—— 生成物，不进仓
+cc-board-focuswin-*.exe
 node_modules/
 dist/
 *.tmp
 *.log
+
+# ---- 编辑器/插件在仓库里落的工具状态，不是本项目的东西 ----
+.quality-lint-state.json
+.sdlc/
 
 # ---- 系统垃圾 ----
 Thumbs.db

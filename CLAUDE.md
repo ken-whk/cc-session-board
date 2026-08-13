@@ -83,6 +83,20 @@ Get-CimInstance Win32_Process -Filter "Name='ClaudeBoard.exe'" | Select ProcessI
 
 （本机 2026-08 时的包在 `D:\Tools\ClaudeBoard-win-x64\`，换机器后按上面的命令重新查，别照抄这个路径。）
 
+### 1b. `hook.js` 改完**也必须**同步进 bundle，否则下次重启被 first-run 覆盖回旧版
+
+铁律 4 说"被注册进 `settings.json` 的那份 `hook.js` 走 `INSTALL_DIR`"——那句讲的是**哪一份被执行**，不是**改动能不能留住**。`app/first-run.js` 每次启动都会把**包内的 `hook.js` 拷到 `INSTALL_DIR`**（"内容不同才拷，兼作升级"）。所以跑打包版时只改源码目录那份，**下一次重启就被静默还原**。
+
+现象极具迷惑性（2026-08-12 实测踩过）：改动**先生效、后消失**——改完到重启之间触发的 hook 事件写出了带新字段的 state，看着一切正常；重启后 `hook.js` 被还原，各会话下一次 hook 事件又把 state 覆盖成没有新字段的，于是界面上的东西一个一个地掉。很容易误判成"界面层的渲染有 bug"，而实际根因在采集层且已经不在文件里了。
+
+自查：`grep -c <你加的函数名> hook.js`，以及 `ls -la hook.js` 看 mtime 是不是你刚才那次编辑。改完照抄：
+
+```
+cp hook.js "$BUNDLE/resources/app/hook.js" && cmp -s hook.js "$BUNDLE/resources/app/hook.js"
+```
+
+改完重启一次再 `grep` 一遍——**能扛住一次重启才算改完**。
+
 ### 2. 重启必须"全杀再拉起"，否则被单实例锁静默挡掉
 
 双击 exe 时若旧实例还在，新进程会被 `requestSingleInstanceLock()` 挡掉、**静默退出**，现象是"重启了但改动没生效"，极易误判成代码有问题。

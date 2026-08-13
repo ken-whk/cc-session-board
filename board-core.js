@@ -121,6 +121,63 @@ function fileMs(p) {
   try { return fs.statSync(p).mtimeMs } catch (_) { return 0 }
 }
 
+// 子任务（子代理 / 后台任务）判活窗口。
+//
+// 比主循环的静默阈值短得多：这里要回答的是"此刻有没有人在替它干活"，
+// 而不是"卡了多久"。取 30 秒是因为子代理的输出比主循环稀疏 —— 一次工具调用
+// 可能十几秒不落盘，取太短会让计数一闪一闪。
+const SUBWORK_ACTIVE_MS = 30 * 1000
+
+// 数这个会话此刻有多少子任务在动。
+//
+// 为什么需要：看板的 4 个 hook 全是**主循环**事件（UserPromptSubmit / Stop /
+// Notification / SessionEnd），子代理和后台任务一个都不触发。结果是主循环一跑完
+// 就报「✔ 已完成」，而后台还在跑 —— 这比不显示更糟，它告诉你球在你手上，其实不是。
+//
+// 判据用 mtime，跟主循环拿 transcript mtime 当心跳是同一套手法，不引入新信源。
+// 两处产物，路径都从 transcript 推出来（slug 是它的父目录名），不另外猜：
+//
+//   ① 子代理   projects/<slug>/<sessionId>/subagents/*.jsonl
+//   ② 后台任务 <temp>/claude/<slug>/<sessionId>/tasks/*        ← 只认非空文件
+//
+// ② 后台任务不能看文件本身，只能看 transcript 里这个 id 的记录。三条实测把
+// 所有"看文件"的判据都排除了：
+//   · 看 mtime —— `sleep 120` 这类静默任务中途一个字不输出，会被判成不活跃
+//     （现象：刚启动闪一下"1 个子任务"，之后消失）
+//   · 看 size>0 —— 前台调用留下的文件**也会有内容**（实测 59B），挡不住
+//   · 看"非空即在跑" —— tasks/ 里的文件任务结束后**不会被清理**
+//     （实测有 5.5 小时前的残留），会永远误报
+//
+// 能立住的只有 transcript：后台任务启动时 id 会写进去，完成时再落一条带
+// `task-notification` 的记录。**登记过且没有完成通知 = 还在跑。**
+// 前台调用的 id 从不进 transcript（输出走内联返回），天然被排除。
+//
+// 只给数量，不给内容 —— 要知道子任务在干什么就得读 agent jsonl 正文，
+// 成本和隐私都不划算，而"有几个在跑"已经足够回答"该不该切过去"。
+// 数这个会话此刻有多少**子代理**在动。
+//
+// 只管子代理。后台 shell 不在这里判 —— 注册表自己有 `status: "shell"`，
+// 是第一方数据（详见 buildRows 里 regStatus 的分支）。
+//
+// 曾经用"扫 tasks/ 目录 + 在 transcript 里找完成通知"来推后台任务，那条路
+// **结构性地修不好**：会话空闲时完成通知根本不会写进 transcript（要等下次
+// 唤醒才注入），于是任务早就结束、看板还一直报"在跑"。实测踩过，已删除。
+// 教训：先去看信源里有没有现成字段，再动手用间接证据重造一个。
+function countActiveSubwork(tp, sessionId, now) {
+  if (!tp || !sessionId) return 0
+  const dir = path.join(path.dirname(tp), sessionId, 'subagents')
+  let names = []
+  // 绝大多数会话这个目录压根不存在，readdir 直接 ENOENT 返回，比先 exists 再读便宜
+  try { names = fs.readdirSync(dir) } catch (_) { return 0 }
+  let n = 0
+  for (const nm of names) {
+    if (!nm.endsWith('.jsonl')) continue
+    const m = fileMs(path.join(dir, nm))
+    if (m > 0 && now - m < SUBWORK_ACTIVE_MS) n++
+  }
+  return n
+}
+
 // 状态呈现表。排序权重按"有多需要你"定，不是按时间。
 //
 // 配色原则：颜色信号集中在「状态」列的文字上（accent），行底色只做极淡的暗示（back）。
@@ -136,6 +193,13 @@ function statusMeta(status) {
     case 'waiting': return { rank: 1, text: '▲ 等你输入', accent: '#E07C00', back: '#FFFAF1', fore: '#222222', desc: '空闲等待你的输入' }
     case 'done':    return { rank: 2, text: '✔ 已完成',   accent: '#2E7D32', back: '#F5FAF6', fore: '#222222', desc: '这一轮跑完了，球在你手上' }
     case 'running': return { rank: 3, text: '● 运行中',   accent: '#1565C0', back: '#FFFFFF', fore: '#222222', desc: '正在干活，不用管' }
+    // 主循环交出去了、但还有子代理 / 后台任务在跑。与 running 同 rank、同配色：
+    // 对"该切到哪去"而言它和运行中是一回事 —— 都不用你操作。
+    //
+    // 单列一档而不是沿用 waiting/done，是因为那两档会把它染成"待处理"橙/绿并排到
+    // 前面去，把你叫过去却无事可做（实测踩过：后台任务在跑，主循环空转触发了
+    // Claude Code 的空闲通知，看板照单收成「等你输入」）。
+    case 'subwork': return { rank: 3, text: '⧗ 后台任务', accent: '#1565C0', back: '#FFFFFF', fore: '#222222', desc: '主循环空闲，但后台 shell / 子代理还在跑 —— 不用你操作，它跑完会自己回来' }
     case 'fresh':   return { rank: 4, text: '○ 空闲',     accent: '#9E9E9E', back: '#FFFFFF', fore: '#909090', desc: '会话开着但还没交互过' }
     case 'stalled': return { rank: 5, text: '… 失联？',   accent: '#757575', back: '#FAFAFA', fore: '#909090', desc: '心跳静默超过 5 分钟（仅注册表降级时出现）' }
     case 'idle':    return { rank: 6, text: '· 久候',     accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0', desc: '超过 2 小时没被处理，默认不显示' }
@@ -145,10 +209,35 @@ function statusMeta(status) {
   }
 }
 
+// 终端宿主的呈现表。判据本身在 hook.js 的 detectHost —— 那里才拿得到会话的 env；
+// 这里只负责把它记下的代号翻成给人看的东西。
+//
+// badge 刻意用 ASCII 短码：它挂在「项目 / worktree」列前面，横向空间是抢来的，
+// 中文一个字顶两个字符宽，三档并排就把项目名挤没了。
+//
+// unverified 标记会透到 hover 文案里 —— 这三条判据至今没有样本（本机只出现过
+// VS Code 和独立 Git Bash 两种宿主）。不标的话，它会变成"看起来权威但从没被验证过"
+// 的结论，等哪天真在 IDEA 里开一个、显示错了，没人知道该怀疑它。
+function hostMeta(host) {
+  switch (host) {
+    case 'vscode':    return { badge: 'VSC',  name: 'VS Code 集成终端', unverified: false }
+    case 'gitbash':   return { badge: 'GB',   name: '独立 Git Bash 窗口（mintty）', unverified: false }
+    case 'jetbrains': return { badge: 'IDEA', name: 'JetBrains 内置终端', unverified: true }
+    case 'wt':        return { badge: 'WT',   name: 'Windows Terminal', unverified: true }
+    case 'console':   return { badge: 'cmd',  name: '裸 cmd / conhost（无任何终端指纹）', unverified: true }
+    // 空字符串 = 这条 state 是加宿主字段之前写的，它下次有动静就会补上。
+    // 与"认出来了但我们没见过"区分开：后者要把原代号显示出来，好知道该加什么判据。
+    case '':
+    case undefined:
+    case null:        return { badge: '', name: '', unverified: false }
+    default:          return { badge: String(host).slice(0, 4), name: '未知终端：' + host, unverified: true }
+  }
+}
+
 // 帮助面板的状态图例。顺序 = rank 顺序 = 「需求度」排序的顺序，
 // 所以图例本身就解释了默认排法。
 function statusLegend() {
-  return ['asking', 'waiting', 'done', 'running', 'fresh', 'stalled', 'idle', 'closed', 'hidden']
+  return ['asking', 'waiting', 'done', 'running', 'subwork', 'fresh', 'stalled', 'idle', 'closed', 'hidden']
     .map((eff) => {
       const m = statusMeta(eff)
       // 字形与文字拆开给界面：图例里字形要单独占一列才能对齐
@@ -658,6 +747,11 @@ function buildRows(opts) {
       eff = 'asking'
     } else if (regStatus === 'busy') {
       eff = 'running'
+    } else if (regStatus === 'shell') {
+      // 注册表的第三种状态：主循环空闲，但还有后台 shell 在跑（run_in_background）。
+      // 这是第一方数据，别再用"扫 tasks/ 目录猜"那一套 —— 那条路在会话空闲时
+      // 拿不到完成通知，会把早已结束的任务一直报成在跑。
+      eff = 'subwork'
     } else if (regStatus === 'idle') {
       if (!st) eff = 'fresh'
       else if (String(st.status) === 'waiting') eff = 'waiting'
@@ -680,6 +774,20 @@ function buildRows(opts) {
         ? now - (Number(st.turn_started_ms) || now)
         : (Number(st.duration_ms) || 0)
     }
+
+    // 子代理计数与改判必须放在 baseEff 定格**之前**：
+    // 顶部那个"待处理 N"走的是 baseEff，晚一步的话状态是改对了、计数却照旧催你。
+    const subCount = (eff === 'closed' || eff === 'hidden') ? 0 : countActiveSubwork(tp, id, now)
+
+    // 主循环已交还（等你输入 / 已完成）但还有子代理在跑 -> 同样归到「后台任务」。
+    //
+    // 后台 shell 那一档已经由注册表的 status:"shell" 覆盖，这里兜的是**后台子代理**
+    // —— 它不改注册表状态，只能靠子代理记录的 mtime 看出来。
+    //
+    // 不改判的话，这一行会顶着"待处理"的橙 / 绿排在前面把你叫过去，而你到了什么也
+    // 做不了 —— 真正在等的是那个子任务，不是你。
+    // 「在问你」不参与改判：那是真的卡住等你作答，有没有子任务都得你回。
+    if (subCount > 0 && (eff === 'waiting' || eff === 'done')) eff = 'subwork'
 
     // 隐藏判定放在所有派生值算完之后 —— 勾「显示全部」时那些数值还要照常显示。
     // 复活条件：这个会话在隐藏之后又有过 hook 事件（updated_ms 变新）。
@@ -723,6 +831,35 @@ function buildRows(opts) {
 
     const meta = statusMeta(eff)
 
+    // 宿主只有 state 一个信源（注册表不记它）。所以刚开还没交互过的会话没有徽标，
+    // 等它第一次触发 hook 才补上 —— 这跟标题的补齐节奏一致，不额外解释。
+    const hostRaw = (st && st.host) ? String(st.host) : ''
+    const hostInfo = hostMeta(hostRaw)
+
+    // 状态文字的后缀。两个信号互斥，按下面的优先级二选一 —— 它们回答的是同一个
+    // 问题的两面（"这行现在到底在不在动"），同时挂上去会自相矛盾。
+    //
+    // ① 有活跃子任务 —— 优先。此时"没产出"是正常的（在等子代理干活），
+    //    再报静默就是误导；而主循环已 done 却还有子任务时，这一条正是把
+    //    「✔ 已完成」这个假信号救回来的东西。
+    // ② 「运行中」但迟迟没有产出 —— 注册表的 busy 只说进程认为自己在忙，
+    //    不说它有没有产出：工具调用挂住（命令不返回 / 网络卡死 / MCP 无响应）时
+    //    busy 照样是 busy。心跳静默是唯一能戳穿这种"假运行"的信号。
+    //    只在 running 且超阈值时追加：正常跑着的会话每几秒就有产出，常年显示一个
+    //    归零又重来的秒数只会制造噪声。
+    //
+    // 措辞沿用「静默」这一个词，不引入"停滞/卡住"等第二种说法 ——
+    // 它陈述事实（多久没产出），不替人下"已经死了"的判断。
+    let statusText = meta.text
+    if (eff === 'subwork') {
+      // 后台 shell 那一档拿不到个数（注册表只说有没有），所以没数就不写数
+      if (subCount > 0) statusText += ' · ' + subCount + ' 个子代理'
+    } else if (subCount > 0) {
+      statusText += ' · ' + subCount + ' 个子任务'
+    } else if (eff === 'running' && hasBeat && silent > SILENT_STALL_MS) {
+      statusText += ' · 静默 ' + formatDuration(silent)
+    }
+
     // 上下文占用。读不到就留空字符串，界面显示 '—'。
     //
     // "陈旧"只对**正在跑**的会话成立 —— 它的上下文在增长，旧快照会低报。
@@ -747,6 +884,10 @@ function buildRows(opts) {
       // 详情面板用的会话元信息，全部来自会话注册表（拿不到就留空 / 0）。
       // 注意与上面的 started 区分：started 会用 first_seen 兜底、并且拿不到时
       // 填 MAX_SAFE_INTEGER 供排序用，不能直接当"启动时刻"显示。
+      // 注册表记的启动目录。与上面的 cwd 分开给：cwd 取自 state，会跟着会话里
+      // 执行的 cd 漂移（实测漂到过 .claude/projects）；要拿"这个会话属于哪个工作区"
+      // 就只能用注册表这份 —— 它从会话启动起就没变过。
+      regCwd: (rg && rg.cwd) ? String(rg.cwd) : '',
       startedMs: (rg && Number(rg.startedAt)) || 0,
       pid: (rg && Number(rg.pid)) || 0,
       ccVersion: (rg && rg.version) ? String(rg.version) : '',
@@ -760,12 +901,18 @@ function buildRows(opts) {
       baseEff,
       hidden: eff === 'hidden',
       rank: meta.rank,
-      statusText: meta.text,
+      statusText,
       accent: meta.accent,
       back: meta.back,
       fore: meta.fore,
       title,
       label,
+      host: hostRaw,
+      // 此刻在动的子代理 / 后台任务数。0 表示没有，不表示"数不出来"——
+      // 这两类工作没有任何 hook 事件，只能靠文件 mtime 观测，拿不到就是没有。
+      subCount,
+      hostBadge: hostInfo.badge,
+      hostName: hostInfo.name + (hostInfo.unverified ? '（判据未实证）' : ''),
       waitText: formatDuration(wait),
       durText: formatDuration(dur),
       silentText: hasBeat ? formatDuration(silent) : '心跳未知',
@@ -878,6 +1025,10 @@ function clearStaleRecords() {
 }
 
 module.exports = {
+  // countActiveSubwork 单独导出，是为了能用**构造样本**验它 —— 它的两条判据
+  // （子代理 mtime / 后台任务的登记与完成通知）都依赖真实运行时才会出现的文件，
+  // 靠等真任务出现来验证既慢又抓不准时机。
+  countActiveSubwork,
   buildRows, getLastExchange, getHealthIssues, getMissingHooks, statusLegend,
   removeRecord, unhideRecord, clearStaleRecords, formatDuration,
   // 用量快照的读取与路径由数据层单一定义，界面层/引导层都从这里取 ——

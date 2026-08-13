@@ -1,13 +1,13 @@
 {
   "name": "claude-session-board",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Claude 会话看板 —— 并发会话状态面板（Windows / macOS）",
   "main": "app/main.js",
   "scripts": {
     "start": "electron .",
     "icon": "node app/make-icon.js",
-    "pack:win": "electron-packager . ClaudeBoard --platform=win32 --arch=x64 --out=dist --overwrite --asar=false --icon=app/icon.ico --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/board-capture|^/frames)\" && node postpack.js",
-    "pack:mac": "electron-packager . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --icon=app/icon.icns --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/board-capture|^/frames)\" && node postpack.js"
+    "pack:win": "electron-packager . ClaudeBoard --platform=win32 --arch=x64 --out=dist --overwrite --asar=false --icon=app/icon.ico --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|^/(capture|watch-flicker|close-board)\\.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/_env-probe|^/cc-board-focuswin|^/board-capture|^/frames)\" && node postpack.js",
+    "pack:mac": "electron-packager . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --icon=app/icon.icns --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|^/(capture|watch-flicker|close-board)\\.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/_env-probe|^/cc-board-focuswin|^/board-capture|^/frames)\" && node postpack.js"
   },
   "private": true,
   "devDependencies": {

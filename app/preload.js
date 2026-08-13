@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld('board', {
   unhideRecord: (sid) => ipcRenderer.invoke('board:unhideRecord', sid),
   clearStale: () => ipcRenderer.invoke('board:clearStale'),
   openFolder: (dir) => ipcRenderer.invoke('board:openFolder', dir),
+  // 切到会话所在的终端窗口。传的是裁剪过的行（同右键菜单那份），
+  // 主进程要读的字段必须在调用处一并传上去，否则恒为 undefined。
+  focusWindow: (row) => ipcRenderer.invoke('board:focusWindow', row),
   statusLegend: () => ipcRenderer.invoke('board:statusLegend'),
   hudStatus: () => ipcRenderer.invoke('board:hudStatus'),
   appInfo: () => ipcRenderer.invoke('board:appInfo'),

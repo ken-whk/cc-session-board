@@ -5,7 +5,7 @@
 // 职责：开窗口、定时向渲染层推数据、托盘图标、系统通知、设置持久化。
 // 所有判定逻辑都在 board-core.js 里，本文件不做业务判断。
 
-const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, nativeImage, clipboard, nativeTheme } = require('electron')
+const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, nativeImage, clipboard, nativeTheme, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const { execFile } = require('child_process')
@@ -327,6 +327,159 @@ ipcMain.handle('board:openHudGuide', async () => {
 })
 ipcMain.handle('board:copyPath', (_e, dir) => { if (dir) clipboard.writeText(String(dir)); return true })
 
+// 切到该会话所在的终端窗口。
+//
+// 只有 Windows 有实现。macOS 要另写一段 AppleScript（osascript 的先例见
+// notifyViaOsascript），没有样本机器验证之前不做 —— 菜单项在 mac 上直接不出现，
+// 好过给一个点了没反应的项。
+//
+// 精度分两档，调用方要照实转述、不能假装做到了标签级：
+//   'title'  —— 命中控制台标题（Claude 会把会话标题写进去），精确到这个会话
+//   'folder' —— 只命中工作区名，VS Code / IDEA 一个窗口装多个终端标签，
+//               落到窗口就到头了，选哪个标签仍得人来点
+// 生成出来的助手 exe。落 INSTALL_DIR 而不是应用包内：包可能装在只读位置
+// （Program Files / macOS 的 /Applications），往里写会静默失败（铁律 4）。
+// 文件名带版本号 —— 改了 focus-window.cs 却不改它，已经编译过的机器会一直用旧的，
+// 改动静默不生效。旧文件不清理，它只有几 KB。
+// v2：请求格式从 title/folder/host 改成 title/host/候选列表。不升版本号的话，
+// 装过 v1 的机器会拿旧 exe 去读新格式（把 host 当 folder），既不报错也不对。
+const FOCUS_EXE = path.join(core.INSTALL_DIR, 'cc-board-focuswin-v2.exe')
+
+// 在盒的 .NET Framework 编译器。Win10/11 一定有，路径固定；64 位优先。
+function cscPath() {
+  const root = process.env.WINDIR || 'C:\\Windows'
+  const cands = [
+    path.join(root, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe'),
+    path.join(root, 'Microsoft.NET', 'Framework', 'v4.0.30319', 'csc.exe'),
+  ]
+  for (const c of cands) { try { if (fs.statSync(c).isFile()) return c } catch (_) { } }
+  return ''
+}
+
+// 看板启动时后台编译一次，把这一秒钟花在没人等的时候。
+// 编译不成不报错也不重试：拿不到 exe 时点击会自动降级走 .ps1，功能不缺，只是慢。
+function ensureFocusHelper() {
+  if (process.platform !== 'win32') return
+  try { if (fs.statSync(FOCUS_EXE).isFile()) return } catch (_) { /* 没有就编 */ }
+  const csc = cscPath()
+  if (!csc) return
+  const cs = path.join(core.CODE_DIR, 'focus-window.cs')
+  if (!fs.existsSync(cs)) return
+  execFile(csc,
+    ['/nologo', '/target:exe', '/platform:anycpu', '/optimize+', '/out:' + FOCUS_EXE, cs],
+    { timeout: 60000, windowsHide: true },
+    () => { /* 成败都不打扰：失败时点击自然降级 */ })
+}
+
+// 这些路径段谁都可能有，拿它们去匹配窗口标题只会撞上无关窗口。
+// 判据是"这个词能不能指认一个工作区"，不是"它是不是目录名"。
+const GENERIC_SEG = new Set([
+  'src', 'app', 'lib', 'test', 'tests', 'main', 'dist', 'build', 'out', 'bin',
+  'node_modules', 'packages', 'apps', 'code', 'work', 'workspace', 'projects',
+  '.sdlc', 'worktrees', '.git', 'server', 'client', 'web', 'api', 'ui', 'docs',
+  // Windows 用户目录那几段：出现在无数窗口标题里，指认不了任何工作区
+  'users', 'home', 'documents', 'desktop', 'downloads', 'temp', 'appdata',
+])
+
+// 工作区名候选，**由细到粗**。
+//
+// 为什么不能只给一个：会话的注册表 cwd 是启动目录（如主仓根），而它实际待的地方
+// 常常是 worktree（.sdlc/worktrees/D-0xx-...）。你要是给那个 worktree 单开一个
+// VS Code 窗口，那个窗口标题里只有 worktree 名、没有主仓名 —— 只拿主仓名去匹配，
+// 会稳定地切到开着主仓的**另一个**窗口，而且看上去还"成功了"。
+//
+// 由细到粗排列，匹配方按顺序取第一个命中的档次，于是"一窗口一 worktree"能精确命中，
+// "只开主仓一个窗口"退回原来的行为、不变差。
+//
+// 上限 6 个：再往上就是 yxt / aicoding 这种共同祖先，对区分窗口没有贡献，
+// 反而多一次撞上无关窗口的机会。
+function folderCandidates(row) {
+  const out = []
+  const push = (p) => {
+    const segs = String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).filter(Boolean)
+    for (let i = segs.length - 1; i >= 0; i--) {
+      const s = segs[i]
+      // 盘符（E:）、过短、通用段一律跳过
+      if (s.length < 3 || /^[a-zA-Z]:$/.test(s)) continue
+      if (GENERIC_SEG.has(s.toLowerCase())) continue
+      if (!out.includes(s)) out.push(s)
+      if (out.length >= 6) return
+    }
+  }
+  // state 的 cwd 更贴近会话实际位置（哪怕它会跟着 cd 漂），先拿它；
+  // 注册表 cwd 是稳定的启动目录，垫底兜住。
+  push(row.cwd)
+  push(row.regCwd)
+  return out
+}
+
+function focusSessionWindow(row, onDone) {
+  if (process.platform !== 'win32') { onDone({ ok: false, reason: 'unsupported' }); return }
+
+  // 请求走 UTF-8 文件而不是命令行参数：会话标题是中文，命令行传参要过控制台
+  // 代码页，Windows 上会乱码（CLAUDE.md 铁律 3 是同一个根因的另一面）。
+  //
+  // 三行纯文本而不是 JSON：字段只有三个且永不嵌套，C# 侧解析 JSON 要么加依赖
+  // 要么手写；顺带也躲掉了 .ps1 那版踩过的 ConvertFrom-Json 类型强转坑。
+  const reqFile = path.join(app.getPath('temp'), 'cc-board-focus.txt')
+  const oneLine = (s) => String(s == null ? '' : s).replace(/[\r\n]+/g, ' ')
+  const lines = [oneLine(row.title), oneLine(row.host)].concat(folderCandidates(row))
+  try {
+    fs.writeFileSync(reqFile, lines.join('\n'), 'utf8')
+  } catch (e) {
+    onDone({ ok: false, reason: 'error' })
+    return
+  }
+
+  const done = (err, stdout) => {
+    let res = { ok: false, reason: 'error' }
+    try { res = JSON.parse(String(stdout).trim()) } catch (_) { /* 保持 error */ }
+    if (err && !res.ok) res.reason = res.reason || 'error'
+    onDone(res)
+  }
+
+  // 快路径：生成好的 exe，几十毫秒。
+  let hasExe = false
+  try { hasExe = fs.statSync(FOCUS_EXE).isFile() } catch (_) { hasExe = false }
+  if (hasExe) {
+    execFile(FOCUS_EXE, [reqFile], { timeout: 15000, windowsHide: true }, done)
+    return
+  }
+
+  // 兜底：同样逻辑的 PowerShell 版，慢约十倍（实测 ~870ms vs ~70ms），
+  // 但不依赖 csc。exe 还没编好、或这台机器编不出来时走这里。
+  // .ps1 走 CODE_DIR：它是**代码**，跟着应用包走，不在可写目录里。
+  ensureFocusHelper()
+  const ps1 = path.join(core.CODE_DIR, 'focus-window.ps1')
+  execFile('powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, '-Req', reqFile],
+    { timeout: 15000, windowsHide: true }, done)
+}
+
+// 成功不提示：窗口已经切过去了，再弹个框反而把焦点抢回来，等于把刚做成的事撤销一半。
+// 失败才说话，且要说清为什么 —— 静默失败会让人以为看板卡了。
+function focusWithFeedback(row, parentWin) {
+  focusSessionWindow(row, (res) => {
+    if (res.ok) return
+    const why = {
+      no_match: '没找到对应的窗口。\n\n'
+        + '可能原因：会话所在的终端已经关掉；或者它的宿主看板还认不出来'
+        + '（IDEA / Windows Terminal / 裸 cmd 这几档判据尚未实证）。',
+      focus_refused: '找到了窗口，但系统拒绝了置顶请求。再点一次通常就好。',
+      unsupported: '这个功能目前只在 Windows 上实现。',
+      error: '调用失败。',
+    }[res.reason] || '调用失败。'
+    dialog.showMessageBox(parentWin, {
+      type: 'info', title: '切到该会话的窗口', message: why, buttons: ['知道了'],
+    })
+  })
+}
+
+ipcMain.handle('board:focusWindow', (e, row) => {
+  if (row) focusWithFeedback(row, BrowserWindow.fromWebContents(e.sender))
+  return true
+})
+
 // 右键菜单必须由主进程弹原生菜单。
 // 不能在页面里用 window.prompt() —— Electron **默认禁用 prompt**（返回 null 并告警），
 // 我第一版就是那么写的，在打包版里等于没有右键功能。
@@ -338,6 +491,10 @@ ipcMain.on('board:contextMenu', (e, row) => {
       : { label: '隐藏这一条', click: () => { core.removeRecord(row.sessionId); tick() } },
     { label: '复制目录路径', click: () => { if (row.cwd) clipboard.writeText(String(row.cwd)) } },
     { label: '打开目录', click: () => { if (row.cwd) shell.openPath(row.cwd) } },
+    ...(process.platform === 'win32' ? [{
+      label: '切到该会话的窗口',
+      click: () => focusWithFeedback(row, BrowserWindow.fromWebContents(e.sender)),
+    }] : []),
   ])
   menu.popup({ window: BrowserWindow.fromWebContents(e.sender) })
 })
@@ -451,6 +608,10 @@ if (!app.requestSingleInstanceLock()) {
     createTray()
     tick()
     timer = setInterval(tick, REFRESH_MS)
+
+    // 切窗口用的助手 exe：放在这里编，是因为此刻没人在等 —— 编译约 1 秒，
+    // 挪到第一次点击时做就正好把那一秒摊在最该快的路径上。已存在则直接返回。
+    ensureFocusHelper()
 
     // 系统主题切换时：重推一帧给页面，同时刷标题栏底色（跟随系统模式下才有效）
     nativeTheme.on('updated', () => {

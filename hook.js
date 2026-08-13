@@ -190,6 +190,34 @@ function pruneStale() {
   } catch (_) { /* 目录还不存在等，忽略 */ }
 }
 
+// 这个会话跑在哪个终端宿主里。
+//
+// 为什么只能在 hook 里判：hook 由 Claude Code 拉起，继承的 env 里带着终端指纹；
+// 看板进程自己的 env 是它自己的宿主，跟被观测的会话无关。
+//
+// 为什么不走进程树：Windows 上终端宿主（VS Code / Windows Terminal / IDEA）经 ConPTY
+// 与 shell 通信，**不是 shell 的祖先**，祖先链会断在已退出的中间 pid 上（实测：
+// claude.exe <- winpty-agent.exe <- winpty.exe <- ?，以及 claude.exe <- sh.exe <- ?）。
+//
+// 判据实证情况（2026-08-12，同机同时刻三个会话）：
+//   vscode / mintty 两条**已实证**且能干净分离，其中 vscode 有 Human 确认的 ground truth。
+//   jetbrains / wt / console 三条**未实证**，无样本，按各自平台约定写，出现样本前不要当真。
+//
+// 刻意不判「里层 shell 是 bash / cmd / powershell」：hook 拿到的 env 是 Claude Code
+// 洗过再经一层 shell 传下来的（实测 hook 的 SHLVL=1 而同源 Bash 子进程是 2，且 PWD/_
+// 被那层 shell 重写过），MSYSTEM 到底来自终端还是那一层无法区分。没有判据就不做字段 ——
+// 一个对所有会话都答 bash 的字段比没有更糟。
+function detectHost(env) {
+  if (env.TERM_PROGRAM === 'vscode') return 'vscode'
+  if (env.TERMINAL_EMULATOR === 'JetBrains-JediTerm') return 'jetbrains'
+  if (env.WT_SESSION) return 'wt'
+  if (env.TERM_PROGRAM === 'mintty') return 'gitbash'
+  // 认不出的宿主原样记下来，别塞进 'console' 兜底 —— 那会把"没见过的终端"
+  // 和"确实是裸控制台"混成一档，以后加判据时无从分辨。
+  if (env.TERM_PROGRAM) return String(env.TERM_PROGRAM).toLowerCase().slice(0, 24)
+  return 'console'
+}
+
 function writeAtomic(file, text) {
   // 同目录 temp + rename：Windows 下同盘 rename 是原子替换，
   // GUI 侧因此不需要加锁也读不到半个文件。
@@ -225,6 +253,38 @@ function main() {
   const cwd = payload.cwd || process.cwd()
   const file = path.join(STATE_DIR, String(sessionId).replace(/[^\w.-]/g, '_') + '.json')
 
+  // 一次性取证：hook 进程看到的终端指纹环境变量。判据定稿后应当连同本段一起删除。
+  //
+  // 隐私：白名单键才记值，其余**只记键名不记值** —— env 里有 API token 之类的东西，
+  // 全量落盘等于把凭据写进文件。产物 _env-probe.json 已在 .gitignore。
+  try {
+    const envProbe = path.join(BOARD_DIR, '_env-probe.json')
+    let acc = {}
+    try { acc = JSON.parse(fs.readFileSync(envProbe, 'utf8')) } catch (_) { acc = {} }
+    if (!acc[sessionId]) {
+      const WHITELIST = [
+        'TERM', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'TERMINAL_EMULATOR',
+        'WT_SESSION', 'WT_PROFILE_ID', 'SESSIONNAME', 'MSYSTEM', 'SHELL',
+        'ComSpec', 'PSModulePath', 'COLORTERM', 'VSCODE_GIT_IPC_HANDLE',
+        'VSCODE_INJECTION', 'VSCODE_PID', 'CLAUDE_CODE_ENTRYPOINT',
+        // SHLVL/PWD/_ 用来判断 hook 与终端之间有没有多插一层 shell
+        'SHLVL', 'PWD', '_',
+      ]
+      const picked = {}
+      for (const k of WHITELIST) if (process.env[k] !== undefined) picked[k] = process.env[k]
+      acc[sessionId] = {
+        at: new Date().toISOString(),
+        event: status,
+        cwd,
+        ppid: process.ppid,
+        host: detectHost(process.env),
+        picked,
+        allKeys: Object.keys(process.env).sort(),
+      }
+      writeAtomic(envProbe, JSON.stringify(acc, null, 2))
+    }
+  } catch (_) { /* 探针写不了不影响主流程 */ }
+
   // 会话关闭：直接删记录。否则关掉的会话会挂在看板上直到 24h 过期清理，
   // 让你误以为它还在跑（实测踩过：看板行数比真实开着的会话多）。
   if (status === 'closed') {
@@ -254,6 +314,9 @@ function main() {
     session_id: sessionId,
     cwd: cwd,
     label: deriveLabel(cwd),
+    // 终端宿主。每次都重算而不是沿用 prev —— 会话的宿主不会变，但沿用会让
+    // 判据改进后存量记录永远停在旧结论上，且掩盖"某次 hook 的 env 异常"这种问题。
+    host: detectHost(process.env),
     status: status,
     title: title,
     title_scanned: (prev.title_scanned === true) || allowFullScan,

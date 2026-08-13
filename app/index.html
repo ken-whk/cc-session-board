@@ -14,6 +14,19 @@
     --fg-dim: #9a9a9a;
     --line: #ececec;
     --muted: #8a8a8a;
+    /* 状态栏专用的次要色。--muted 是给"大段说明文字"用的，铺在正文白底上够用；
+       底栏字号只有 12px 又压在 --bar-bg 那层浅灰上，同一个灰就淡到看不清了。
+       不直接调 --muted：它同时管着帮助面板和详情提示，那些地方现在是合适的。 */
+    --muted-strong: #4a5057;
+    /* 终端宿主徽标。比正文淡、但仍在 4.5:1 线上（实测 5.0:1）——
+       它要能读，又不能跟项目名平起平坐。 */
+    --badge-fg: #6b7075;
+    /* 边框按**非文本** 3:1 取（3.28:1），不是按文字的 4.5:1 —— 用错标准会得出
+       "边框做不出来"的结论。比框内文字淡一档，是框不是块。 */
+    --badge-line: #878f97;
+    /* 倒计时临近重置时的字色。两档：剩 ≤15% / ≤5%。 */
+    --soon-fg: #1565c0;
+    --imminent-fg: #0d47a1;
     --hover: #f0f4f8;
     --sel: #d6e8f7;
     --head-bg: #f7f7f7;
@@ -43,6 +56,13 @@
     --fg-dim: #8b9096;
     --line: #2a2e33;
     --muted: #8b9096;
+    /* 深色下原值 #b3bac1 是 8.73:1，跟标签的 13.26:1 只差一点点，底栏读起来
+       是一片没有层次的亮灰。降到 6.7:1 把两级拉开，仍远高于 4.5 的线。 */
+    --muted-strong: #9ba3ab;
+    --badge-fg: #9aa1a8;
+    --badge-line: #666e76;
+    --soon-fg: #64b5f6;
+    --imminent-fg: #90caf9;
     --hover: #24292e;
     --sel: #2c3e50;
     --head-bg: #23272b;
@@ -169,6 +189,8 @@
   tr[data-eff="waiting"] { background: var(--t-waiting); }
   tr[data-eff="done"]    { background: var(--t-done); }
   tr[data-eff="running"] { background: var(--t-plain); }
+  /* 「等子任务」跟运行中同待遇：都属于"它在干活，不用你管"那一类 */
+  tr[data-eff="subwork"] { background: var(--t-plain); }
   tr[data-eff="fresh"]   { background: var(--t-plain); }
   tr[data-eff="stalled"], tr[data-eff="idle"],
   tr[data-eff="closed"],  tr[data-eff="hidden"] { background: var(--t-dim); }
@@ -180,12 +202,45 @@
   tr[data-eff="waiting"] td.status, .st-waiting { color: var(--c-waiting); }
   tr[data-eff="done"]    td.status, .st-done    { color: var(--c-done); }
   tr[data-eff="running"] td.status, .st-running { color: var(--c-running); }
+  tr[data-eff="subwork"] td.status, .st-subwork { color: var(--c-running); }
   tr[data-eff="fresh"]   td.status, .st-fresh   { color: var(--c-fresh); }
   tr[data-eff="stalled"] td.status, .st-stalled { color: var(--c-stalled); }
   tr[data-eff="idle"]    td.status, .st-idle    { color: var(--c-idle); }
   tr[data-eff="closed"]  td.status, .st-closed  { color: var(--c-closed); }
   tr[data-eff="hidden"]  td.status, .st-hidden  { color: var(--c-hidden); }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* 终端宿主徽标：挂在「项目 / worktree」列名字前面。
+     不给它单开一列 —— 这块横向空间已经很紧，而"跑在哪个终端里"是查问题时才看的
+     辅助信息，不值得常年占一整列宽度。
+     压灰 + 小字号是刻意的：它不参与"该切到哪个会话"的判断，不能跟状态列抢注意力。 */
+  /* 描边框 + 无填充。三版才收敛，两个教训都记在这：
+     ① 初版填色药丸，底 vs 行底只有 1.08:1（浅）/ 1.12:1（深）—— 那个盒子从没被看见过。
+        填色这条路走不通：要让底色可见就得深一大截，那就成了抢眼的灰块。
+     ② 于是砍成纯文字。但边框本身没错，错的是它当时是 1.15:1 的幽灵线 ——
+        边框属于**非文本元素**，门槛是 3:1 而不是文字的 4.5:1，按 4.5 那套去想就会
+        误判成"边框做不出来"。
+
+     现在：边框 3.28:1（浅）/ 3.20:1（深），清楚可见；框内文字 5.0 / 6.3，比边框重一档；
+     两者都明显淡于项目名（15.9 / 13.3）。层次是 项目名 > 徽标文字 > 边框。
+
+     刻意保持无彩色：色相是状态列的专属信号，徽标一旦上色就会跟「在问你 / 等你输入」
+     抢注意力，而它只是身份信息、不参与"该切哪条"的判断。 */
+  /* 固定宽度的槽位：徽标本身宽度不一（GB 两字符、VSC 三字符、IDEA 四字符），
+     直接跟在后面的话项目名会一行一个起点，整列参差。槽位定宽 + 徽标左对齐，
+     名字就都从同一个 x 开始。
+     没有徽标的行也保留这个槽位（只隐藏徽标本身，不塌缩宽度）—— 否则"还没采到
+     宿主"的那几行又会比别人靠左，跟没修一样。 */
+  .hslot { display: inline-block; width: 42px; vertical-align: middle; }
+  .hbadge {
+    display: inline-block; padding: 0 4px;
+    font-size: 10px; line-height: 15px; font-weight: 700; letter-spacing: .6px;
+    color: var(--badge-fg); border: 1px solid var(--badge-line); border-radius: 3px;
+    font-family: Consolas, 'Cascadia Mono', monospace; vertical-align: middle;
+  }
+  /* 判据没有样本验证过的宿主用虚线框 —— 显示错了要有迹可循，
+     不能让未实证的和已实证的看起来一模一样。 */
+  .hbadge.unv { border-style: dashed; }
 
   /* 百分比柱（meter）：上下文列与顶部用量共用一个组件。
      ① 显式轨道（灰底 + 描边）—— 早先把渐变直接铺在单元格背景上省了一层 DOM，
@@ -232,11 +287,29 @@
   }
   /* 灯必须带标签。只放一颗裸的绿点，没人看得出它在说什么 ——
      实测：第一个看到的人就问了"这个小绿点是做什么的"。 */
-  .hstat { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); }
+  .hstat { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-strong); }
   .sep { width: 1px; height: 12px; background: var(--chip-line); }
-  .usage { display: inline-flex; align-items: center; gap: 14px; }
+  /* 两个窗口之间插竖线而不是单纯拉大间距：光靠间距，"余2h34m 周" 这种
+     文字紧挨着仍然读成一串，分不清 "余6d8h" 是哪一组的。竖线是底栏已有的
+     分隔词汇（hook 状态与用量之间就用它），不引入第二种分隔样式。
+     组内 5px / 组间 12px + 竖线 —— 层级靠"竖线"而不是靠间距倍数拉开。 */
+  .usage { display: inline-flex; align-items: center; gap: 12px; }
   .usage .u { display: inline-flex; align-items: center; gap: 5px; }
-  .usage .off { color: var(--muted); }
+  /* 组标签给一点字重：每组的视线落点是它，有了锚点才扫得快 */
+  .usage .u > span:first-child { font-weight: 600; color: var(--fg); }
+  /* 等宽数字：倒计时每秒在变，比例数字下 "1" 比 "8" 窄，整条底栏会跟着左右蠕动。
+     注意它只解决**同位数字宽度不等**，不解决**位数变化**（"2m" 与 "12m" 差一个字符）
+     —— 后者仍要靠分钟段补零。两者各治一半，别以为有了 tabular-nums 就能把补零删掉。 */
+  .usage .off { color: var(--muted-strong); font-variant-numeric: tabular-nums; }
+  /* 倒计时临近重置时上色。
+     判据是**剩余时间占窗口的比例**，与旁边柱子的用量百分比无关 —— 这两个是正交的量：
+     用了多少 ≠ 还有多久回血。曾经把这里接到柱子的档位上，等于让倒计时去表达一件
+     它不表达的事（62% 用量和"还剩 18 分钟重置"之间没有任何推导关系）。
+
+     用蓝色系而不是橙红：临近重置是**有利**信号（撑一下就满血），橙红会跟
+     「额度快没了」的告警撞语义，看到红反而误判成坏事。深浅两档表示"临近"的程度。 */
+  .usage .off.lv-soon { color: var(--soon-fg); }
+  .usage .off.lv-imminent { color: var(--imminent-fg); font-weight: 600; }
 
   .detail { border-top: 1px solid var(--border); padding: 6px 10px 10px; }
   .detail .hint { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
@@ -363,7 +436,7 @@
 </div>
 
 <div class="detail">
-  <div class="hint">选中会话的最近一轮对话（双击 = 打开目录；右键 = 菜单；Delete = 隐藏这一条；Esc = 取消选择）：</div>
+  <div class="hint">选中会话的最近一轮对话（双击 = 切到该会话的窗口；右键 = 菜单（含打开目录）；Delete = 隐藏这一条；Esc = 取消选择）：</div>
   <div class="meta" id="meta"></div>
   <pre id="detail"></pre>
 </div>
@@ -418,12 +491,16 @@ let trById = new Map()       // sessionId -> <tr>，用于增量更新，避免�
 // 那才是你要找的），名字类默认升序。
 const COLUMNS = [
   {
-    key: 'status', label: '状态', width: 110, cls: 'status',
+    key: 'status', label: '状态', width: 150, cls: 'status',
     get: (r) => r.statusText, sortKey: 'rank', dirDefault: 'asc',
-    tip: '按"有多需要你"分档。点击本列 = 按需求度排序（在问你 → 等你输入 → 已完成 → 运行中 …）',
+    tip: '按"有多需要你"分档。点击本列 = 按需求度排序（在问你 → 等你输入 → 已完成 → 运行中 …）。\n'
+      + '后缀「· N 个子任务」= 此刻有这么多子代理 / 后台任务在动。'
+      + '出现在「已完成」后面时尤其要注意：主循环跑完了，但活还没干完，球不在你手上。\n'
+      + '后缀「· 静默 Nm」= 已经这么久没有任何产出 —— 进程还报忙但产出停了，'
+      + '通常是工具调用挂住（命令不返回 / 网络卡死 / MCP 无响应）。有子任务在跑时不显示这条。',
   },
   {
-    key: 'title', label: '会话标题', width: 210,
+    key: 'title', label: '会话标题', width: 248,
     get: (r) => r.title, sortKey: 'title', dirDefault: 'asc',
     tip: '优先取 Claude Code 的会话标题（/resume 列表里那个）；没有就用你最近敲的那句',
   },
@@ -448,12 +525,6 @@ const COLUMNS = [
     tip: '运行中 = 本轮已经跑了多久；否则 = 上一轮跑了多久',
   },
   {
-    key: 'silent', label: '静默', width: 78, cls: 'num',
-    get: (r) => r.silentText, sortKey: 'silent', dirDefault: 'desc',
-    tip: '该会话的 transcript 多久没被写过，也就是多久没有任何产出。'
-      + '用来判断一个"运行中"是不是其实卡住了；超过 5 分钟且注册表不可用时标为「失联？」',
-  },
-  {
     key: 'started', label: '启动时间', width: 96, cls: 'num',
     get: (r) => clockText(r.startedMs) || '—', sortKey: 'startedMs', dirDefault: 'desc',
     tip: '会话启动时刻（来自 Claude Code 的会话注册表）。默认排序就是按它升序 = 启动顺序',
@@ -461,6 +532,8 @@ const COLUMNS = [
 ]
 
 const CTX_COL = COLUMNS.findIndex((c) => c.key === 'ctx')
+// 项目列也是结构化单元格（徽标 + 名字），跟 ctx 列一样不能走 textContent
+const LABEL_COL = COLUMNS.findIndex((c) => c.key === 'label')
 
 // 排序状态：col=null 表示默认排法（启动顺序，即 startedMs 升序）。
 // 点同一列循环 升 → 降 → 默认。
@@ -468,11 +541,15 @@ let sortCol = null
 let sortDir = 'asc'
 
 // 百分比柱的配色分档。上下文占用与账号额度共用这一套。
-// 分档不等宽：低位一大档（30% 以下都算"随便用"），越靠满格切得越细
+// 分档不等宽：低位一大档（60% 以下都算"随便用"），越靠满格切得越细
 // （75 / 90 两道线），因为决策压力集中在末段 —— 92% 和 78% 是两回事，
-// 而 12% 和 26% 没区别。
+// 而 12% 和 55% 都只意味着"还早"。
 //
-// 五档：绿 → 天蓝 → 黄 → 紫 → 红。
+// 四档：绿 → 黄 → 紫 → 红。
+//
+// 原先在 30% 处还有一道天蓝档。取消掉是因为它与"分档服务于决策"这条自相矛盾：
+// 30% 和 55% 你的动作完全一样（继续用），却给了两种颜色，等于用颜色制造了
+// 一个并不存在的分界。低位合成一档之后，出现非绿色本身就成了信号。
 //
 // 排序按"看上去有多重"递增，不是按色相环 —— 读者不该需要记住哪档更严重。
 // 紫（取自 claude-hud 的额度条配色）比黄更深更饱和，所以 黄 → 紫 → 红 仍然是
@@ -488,9 +565,12 @@ const METER_TIERS = [
   { min: 90, color: 'rgba(214,25,25,.88)',   name: '大红' },
   { min: 75, color: 'rgba(214,112,214,.55)', name: '洋红' },
   { min: 60, color: 'rgba(240,200,40,.75)',  name: '黄' },
-  { min: 30, color: 'rgba(59,142,234,.52)',  name: '蓝' },
   { min: 0,  color: 'rgba(35,209,139,.55)',  name: '绿' },
 ]
+
+// 倒计时的两道线：剩余时间占窗口的比例。与柱子的用量档位无关，别把两者接起来。
+const NEAR_SOON = 0.15
+const NEAR_IMMINENT = 0.05
 
 function meterColor(pct) {
   for (const t of METER_TIERS) if (pct >= t.min) return t.color
@@ -539,6 +619,36 @@ function paintCtxCell(td, r) {
       + (r.ctxStale ? '（快照已陈旧，可能低报）' : ''))
     : '拿不到上下文用量'
   if (td.title !== tip) td.title = tip
+}
+
+function buildLabelCell(td) {
+  const slot = document.createElement('span')
+  slot.className = 'hslot'
+  const b = document.createElement('span')
+  b.className = 'hbadge'
+  slot.appendChild(b)
+  const t = document.createElement('span')
+  td.appendChild(slot)
+  td.appendChild(t)
+}
+
+function paintLabelCell(td, r) {
+  const b = td.firstChild.firstChild
+  const t = td.lastChild
+  const badge = r.hostBadge || ''
+  // 用 visibility 而不是 display：槽位的宽度要留住，否则没徽标的行（宿主还没采到）
+  // 名字会比别人靠左，整列还是不齐 —— 那正是加槽位要解决的问题。
+  const vis = badge ? 'visible' : 'hidden'
+  if (b.style.visibility !== vis) b.style.visibility = vis
+  if (b.textContent !== badge) b.textContent = badge
+  const unv = /（判据未实证）$/.test(r.hostName || '')
+  if (b.classList.contains('unv') !== unv) b.classList.toggle('unv', unv)
+  const tip = r.hostName || ''
+  if (b.title !== tip) b.title = tip
+  const v = String(r.label == null ? '' : r.label)
+  if (t.textContent !== v) t.textContent = v
+  // 名字可能被列宽截断，整格给一份完整值兜底
+  if (td.title !== v) td.title = v
 }
 
 // ---- 表头：生成 + 排序 + 拖宽 ----
@@ -697,6 +807,7 @@ function renderRows(rowsIn) {
         const cls = COLUMNS[c].cls
         if (cls) td.className = cls
         if (cls === 'ctx') buildCtxCell(td)
+        if (c === LABEL_COL) buildLabelCell(td)
         tr.appendChild(td)
       }
       trById.set(r.sessionId, tr)
@@ -708,6 +819,7 @@ function renderRows(rowsIn) {
       // 上下文列是结构化单元格（轨道 + 数字），不能走 textContent ——
       // 那会把内部 DOM 冲掉，每帧重建一次进度条。
       if (c === CTX_COL) { paintCtxCell(td, r); continue }
+      if (c === LABEL_COL) { paintLabelCell(td, r); continue }
       const v = String(COLUMNS[c].get(r) == null ? '' : COLUMNS[c].get(r))
       if (td.textContent !== v) td.textContent = v
     }
@@ -792,11 +904,28 @@ tb.addEventListener('click', (e) => {
   for (const t of trById.values()) t.classList.toggle('sel', t === tr)
   showDetail(selected)
 })
-tb.addEventListener('dblclick', (e) => {
+// 送给主进程的行是**裁剪过的**，只有这里列出的字段能被主进程读到 ——
+// 加字段必须两头一起改，否则主进程侧恒为 undefined、分支永远走不到（踩过）。
+// 只此一份：右键菜单和双击共用，免得加了字段只补一处。
+// title / host / regCwd 是「切到该会话的窗口」的匹配依据。
+function ipcRow(r) {
+  return {
+    sessionId: r.sessionId, cwd: r.cwd, label: r.label, hidden: !!r.hidden,
+    title: r.title, host: r.host, regCwd: r.regCwd,
+  }
+}
+
+// 双击 = 切到那个会话的终端窗口。
+//
+// 原先双击是"打开目录"。换掉是因为看板的职责是"该切到哪个会话去"，双击作为
+// 这张表上最顺手的动作，理应干那件正事；而打开目录属于顺带操作，右键菜单里
+// 已经有了，不该占着主手势。
+window.board && tb.addEventListener('dblclick', (e) => {
   const tr = e.target.closest('tr')
   if (!tr) return
   const r = rowsById.get(tr.dataset.id)
-  if (r) window.board.openFolder(r.cwd)
+  if (!r) return
+  window.board.focusWindow(ipcRow(r))
 })
 // 点空白处取消选择
 document.querySelector('.wrap').addEventListener('mousedown', (e) => {
@@ -836,7 +965,7 @@ tb.addEventListener('contextmenu', (e) => {
   // 在页面里自己造菜单也不如原生的顺手（键盘导航、Mac 上的外观）。
   // hidden 必须带上 —— 主进程靠它决定菜单第一项是「隐藏」还是「取消隐藏」。
   // 漏了它的话 row.hidden 恒为 undefined，永远只显示「隐藏」。
-  window.board.showContextMenu({ sessionId: r.sessionId, cwd: r.cwd, label: r.label, hidden: !!r.hidden })
+  window.board.showContextMenu(ipcRow(r))
 })
 
 // ---- 顶部控件 ----
@@ -925,12 +1054,26 @@ async function buildHelp() {
     + '以及「用量显示设置（5h / 周）」—— 顶部额度柱子的开启引导，随时能再打开')
 
   helpBody.appendChild(el('h3', null, '柱子怎么读 · 上下文列与顶部额度共用同一套'))
-  helpBody.appendChild(el('p', 'lead', '百分比数字压在柱子里，颜色按占用高低分五档（越靠满格切得越细）：'))
+  helpBody.appendChild(el('p', 'lead',
+    '百分比数字压在柱子里，颜色按占用高低分 ' + METER_TIERS.length + ' 档（越靠满格切得越细）：'))
 
-  // 图例直接渲染真的柱子组件：说明和实物不可能对不上
+  // 图例直接渲染真的柱子组件：说明和实物不可能对不上。
+  //
+  // 档位区间与取样值也一律**从 METER_TIERS 推导**，不再手抄。原先这里是一份平行
+  // 的字符串数组，改了分档不改它就会静默说谎 —— 取消天蓝档那次，它就还在讲五档。
   const sw = el('div', 'swatches')
-  const ranges = ['< 30%', '30–59%', '60–74%', '75–89%', '≥ 90%']
-  const samples = [15, 45, 68, 82, 95]
+  const tiers = METER_TIERS.slice().sort((a, b) => a.min - b.min)
+  const ranges = tiers.map((t, i) => {
+    const next = tiers[i + 1]
+    if (!next) return '≥ ' + t.min + '%'
+    if (t.min === 0) return '< ' + next.min + '%'
+    return t.min + '–' + (next.min - 1) + '%'
+  })
+  // 取样值取各档中点，末档取 min 与 100 的中点 —— 用边界值会让相邻两档看着像一档
+  const samples = tiers.map((t, i) => {
+    const hi = tiers[i + 1] ? tiers[i + 1].min : 100
+    return Math.round((t.min + hi) / 2)
+  })
   samples.forEach((pct, i) => {
     const s = el('span', 's')
     const m = makeMeter()
@@ -1027,13 +1170,23 @@ mask.addEventListener('click', (e) => { if (e.target === mask) closeHelp() })
 
 // ---- 顶部账号级用量（5 小时窗 / 7 天窗）----
 
-// 距重置还剩多久。分钟零填充，否则 "3h2m" / "3h12m" 两帧之间宽度会跳。
+// 距重置还剩多久。
+//
+// 满一天进位到「天+小时」：7 天窗常年剩一百多小时，"150h05m" 要在脑子里除以 24
+// 才有概念，而这个位置要的就是一眼判断"还早 / 快到了"。分钟在这个量级没有意义，
+// 进位后直接丢掉，不做 d+h+m 三段 —— 三段会把这块窄条撑开。
+//
+// 只有分钟段补零，小时段不补 —— padding 是拿可读性换宽度稳定，只在抖得勤的地方
+// 才划算：分钟每小时走一遍 0→9（1/6 的时间是窄的），小时一天只在 9→10 和 23→0
+// 变两次宽窄。何况 "6d06h" 的前导零是钟点写法，放在时长上会被读成时刻。
 function untilText(ms) {
   const left = ms - Date.now()
   if (!(left > 0)) return '待刷新'
   const h = Math.floor(left / 3600000)
   const m = Math.floor((left % 3600000) / 60000)
-  if (h > 0) return h + 'h' + String(m).padStart(2, '0') + 'm'
+  // 两段之间留空格："6d8h" 是数字和字母交替，挤在一起要停顿一下才断得开
+  if (h >= 24) return Math.floor(h / 24) + 'd ' + (h % 24) + 'h'
+  if (h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm'
   return (m > 0 ? m : '<1') + 'm'
 }
 
@@ -1041,7 +1194,20 @@ const usageEl = document.getElementById('usage')
 
 // 两个窗口的 DOM 建一次就复用：每帧重建 innerHTML 会让鼠标悬停的 tooltip
 // 每 1.5 秒被掀掉一次，读都读不完。
-const usageSegs = ['5h', '周'].map((name) => {
+// windowMs 是算"还剩百分之几"的分母。写死是合理的 —— 这两个窗口的长度是
+// Anthropic 定义的（5 小时 / 7 天），不是我们能观测到的量，快照里也没有这个字段。
+const USAGE_WINDOWS = [
+  { name: '5h', windowMs: 5 * 60 * 60 * 1000 },
+  { name: '周', windowMs: 7 * 24 * 60 * 60 * 1000 },
+]
+const usageSegs = USAGE_WINDOWS.map(({ name, windowMs }, i) => {
+  // 组间竖线。挂在 usageEl 上而不是 wrap 里边 —— 某个窗口拿不到数据时
+  // 整个 wrap 会被隐藏，竖线跟着藏掉才不会剩一条孤零零的线。
+  if (i > 0) {
+    const sep = document.createElement('span')
+    sep.className = 'sep usep'
+    usageEl.appendChild(sep)
+  }
   const wrap = document.createElement('span')
   wrap.className = 'u'
   const lbl = document.createElement('span')
@@ -1053,8 +1219,11 @@ const usageSegs = ['5h', '周'].map((name) => {
   wrap.appendChild(meter)
   wrap.appendChild(left)
   usageEl.appendChild(wrap)
-  return { wrap, meter, left }
+  return { wrap, meter, left, windowMs }
 })
+// 竖线只在两组都在场时才有意义 —— 只剩一组时它会变成一条没有右侧内容的孤线
+const usageSepEl = usageEl.querySelector('.usep')
+
 const usageOff = document.createElement('span')
 usageOff.className = 'off'
 usageOff.textContent = '5h / 周用量：未启用（设置 → 用量显示设置）'
@@ -1065,6 +1234,7 @@ function renderUsage(u) {
   const off = !u
   usageOff.style.display = off ? '' : 'none'
   for (const s of usageSegs) s.wrap.style.display = off ? 'none' : ''
+  if (usageSepEl) usageSepEl.style.display = off ? 'none' : ''
   if (off) {
     usageEl.title = '这两个数字来自 Anthropic 官方 usage 接口，认证需要账号凭据。\n'
       + '看板刻意不联网、不碰凭据，改为读 claude-hud 写出的快照文件。\n'
@@ -1073,14 +1243,26 @@ function renderUsage(u) {
   }
 
   const data = [u.fiveHour, u.sevenDay]
+  // 有一组缺数据时竖线也要收起来，否则底栏末尾会挂一条右边空无一物的线
+  if (usageSepEl) usageSepEl.style.display = (u.fiveHour && u.sevenDay) ? '' : 'none'
   usageSegs.forEach((s, i) => {
     const w = data[i]
     if (!w) { s.wrap.style.display = 'none'; return }
     paintMeter(s.meter, w.pct, w.pct + '%', u.stale)
     // 重置倒计时放台面上，不塞 tooltip —— "还剩多少额度"和"多久后归零"
     // 是同一个决策的两半：只看百分比没法判断该现在收手还是等一会儿。
-    const t = w.resetsAt ? '余' + untilText(w.resetsAt) : ''
+    // 「余」与数字之间留空：中文标签紧贴西文数字时，两种字形的边界会糊在一起
+    // （汉字是全宽方块、数字是窄字形），加一个空格就把"标签"和"值"分开了。
+    // 单位之间那个空格是同一个道理，见 untilText。
+    const t = w.resetsAt ? '余 ' + untilText(w.resetsAt) : ''
     if (s.left.textContent !== t) s.left.textContent = t
+    // 临近重置就上色。分母是窗口长度，不是用量 —— 5h 窗剩 45 分钟(15%)与
+    // 周窗剩 25 小时(15%)在"快回血了"这件事上是同一个意思，用绝对时长就没法统一。
+    // 已经过点还没刷新（leftMs <= 0，显示"待刷新"）时不上色：那是数据问题，不是信号。
+    const leftMs = w.resetsAt ? w.resetsAt - Date.now() : 0
+    const frac = (leftMs > 0 && s.windowMs > 0) ? leftMs / s.windowMs : 1
+    s.left.classList.toggle('lv-imminent', frac <= NEAR_IMMINENT)
+    s.left.classList.toggle('lv-soon', frac > NEAR_IMMINENT && frac <= NEAR_SOON)
   })
 
   const tip = ['「余」= 距该窗口额度重置还剩多久']
