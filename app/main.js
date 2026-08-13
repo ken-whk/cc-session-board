@@ -30,6 +30,21 @@ const prevStatus = new Map()
 // 所以留一个最近值给菜单标签用。
 let lastFolded = 0
 
+// 自动删除阈值的常用档（小时）。0 = 关闭。
+// 任意时长走「自定义…」，所以这里只放最常用的几个，不追求覆盖全部场景。
+const PURGE_PRESETS = [0, 6, 24, 72, 168]
+
+// 阈值 -> 人话。数据层只认小时，「天」只是显示和输入时的单位，
+// 所以换算只在这一层做，别让"天"漏进 board-core。
+function formatPurgeHours(h) {
+  const n = Math.max(0, Number(h) || 0)
+  if (n === 0) return '关闭'
+  if (n < 24) return n + ' 小时'
+  const d = Math.floor(n / 24)
+  const rest = n % 24
+  return rest === 0 ? d + ' 天' : d + ' 天 ' + rest + ' 小时'
+}
+
 // 默认设置。sort: 0 需求度 / 1 启动顺序 / 2 最近活动 / 3 项目名
 let settings = {
   x: null, y: null, w: 1080, h: 620,
@@ -43,12 +58,23 @@ let settings = {
   // 用量引导只在首次运行自动弹一次；之后靠设置菜单里的入口按需打开，
   // 免得每次启动都被同一个提示拦一下。
   hudGuideShown: false,
+  // 残留记录（会话没了、注册表也没了，只剩 state 文件）过多少**小时**自动删掉。0 = 关闭。
+  // 默认 72（3 天）：短到不让残留堆积，长到你隔个周末回来还能看见前两天关掉的会话。
+  // 存小时是为了让用户能填任意时长（界面上按小时/天输入，落盘统一成小时）。
+  // 不放心自动删数据就在设置里调到「关闭」，右键「删除记录」照样可用。
+  autoPurgeHours: 72,
 }
 
 function loadSettings() {
   try {
     const o = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))
     settings = Object.assign(settings, o)
+    // 旧键迁移：阈值一开始是"天"，改成"小时"以支持任意时长。
+    // 只在新键缺席时换算，否则会把用户后来设的小时值覆盖回去。
+    if (o.autoPurgeDays != null && o.autoPurgeHours == null) {
+      settings.autoPurgeHours = Math.max(0, Number(o.autoPurgeDays) || 0) * 24
+    }
+    delete settings.autoPurgeDays
   } catch (_) { /* 首次运行没有配置文件，用默认值 */ }
 }
 
@@ -215,7 +241,11 @@ function showNotification(title, body, silent, sessionId) {
 function tick() {
   let res
   try {
-    res = core.buildRows({ sortIndex: settings.sort, showFolded: settings.showFolded })
+    res = core.buildRows({
+      sortIndex: settings.sort,
+      showFolded: settings.showFolded,
+      autoPurgeHours: settings.autoPurgeHours,
+    })
   } catch (e) {
     // 异常不静默吞掉 —— 否则界面静止不动，人会读成"没有会话在变化"
     if (win && !win.isDestroyed()) win.webContents.send('board:error', String(e && e.message))
@@ -287,6 +317,7 @@ ipcMain.handle('board:getSessionMeta', (_e, transcript) => {
 })
 ipcMain.handle('board:removeRecord', (_e, sid) => { core.removeRecord(sid); tick(); return true })
 ipcMain.handle('board:unhideRecord', (_e, sid) => { core.unhideRecord(sid); tick(); return true })
+ipcMain.handle('board:purgeRecord', (_e, sid) => { const ok = core.purgeRecord(sid); tick(); return ok })
 ipcMain.handle('board:clearStale', () => { core.clearStaleRecords(); tick(); return true })
 ipcMain.handle('board:openFolder', (_e, dir) => { if (dir) shell.openPath(dir); return true })
 // 帮助面板的状态图例走数据层，别在页面里再抄一份字形和配色
@@ -547,6 +578,14 @@ ipcMain.on('board:contextMenu', (e, row) => {
     row.hidden
       ? { label: '取消隐藏', click: () => { core.unhideRecord(row.sessionId); tick() } }
       : { label: '隐藏这一条', click: () => { core.removeRecord(row.sessionId); tick() } },
+    // 「删除记录」只对残留记录出现（row.orphan，判据在数据层的 isOrphan）。
+    // Why 条件显示而不是常驻置灰：删不掉的行给了入口就得解释"为什么点了还在"，
+    // 而那个解释（存在性是注册表 ∪ state 的并集）根本不该出现在右键菜单里。
+    ...(row.orphan ? [{
+      label: '删除记录',
+      toolTip: '这个会话已经不在了，只剩一条观测记录。删掉不可撤销，也不会再回来',
+      click: () => { core.purgeRecord(row.sessionId); tick() },
+    }] : []),
     { label: '复制目录路径', click: () => { if (row.cwd) clipboard.writeText(String(row.cwd)) } },
     { label: '打开目录', click: () => { if (row.cwd) shell.openPath(row.cwd) } },
     ...((process.platform === 'win32' || process.platform === 'darwin') ? [{
@@ -585,6 +624,16 @@ function applyThemeSource() {
 }
 
 function applySetting(key, value) {
+  // 阈值统一在这里收口 —— 菜单档位和自定义对话框都经过这条路，
+  // 校验只写一次。0 = 关闭，其余夹到 [1 小时, 1 年]。
+  //
+  // 下限 1 小时：更短没有实用意义，而且一个 hook 事件迟到就可能误删掉
+  // 还在跑的会话的观测记录（下次 hook 会重建，但标题/摘要会闪一下）。
+  // 上限 1 年：纯防呆，手滑多打几个 0 不该变成"看起来开着其实永不触发"。
+  if (key === 'autoPurgeHours') {
+    const n = Math.round(Number(value) || 0)
+    value = n <= 0 ? 0 : Math.min(Math.max(n, 1), 24 * 365)
+  }
   settings[key] = value
   if (key === 'theme') applyThemeSource()
   if (key === 'alwaysOnTop' && win) win.setAlwaysOnTop(!!value)
@@ -629,6 +678,45 @@ ipcMain.on('board:settingsMenu', (e) => {
       label: '把已完成 / 久候 / 已关闭收起来',
       toolTip: '只记一条"我不想再看见它"的意图，不删数据；它们下次有动静会自己回来',
       click: () => { core.clearStaleRecords(); tick() },
+    },
+    {
+      // 常用档一点即中，「自定义」是逃生口 —— 原生菜单里没有输入控件
+      // （Electron 连 window.prompt 都禁用了），任意时长只能弹自绘对话框。
+      // 「关闭」那一档是退路：哪天不放心自动删数据，关掉它，
+      // 右键「删除记录」照样能一条条清。
+      label: '自动删除残留记录（' + formatPurgeHours(settings.autoPurgeHours) + '）',
+      toolTip: '会话没了、注册表也没了、只剩一条观测记录的行；超过这个时长自动删掉',
+      submenu: [
+        ...PURGE_PRESETS.map((h) => ({
+          label: h === 0 ? '关闭（只手动删）' : formatPurgeHours(h) + '后',
+          type: 'radio',
+          checked: Number(settings.autoPurgeHours) === h,
+          click: () => applySetting('autoPurgeHours', h),
+        })),
+        // 这里**不能**放 separator：Electron 的 radio 分组以分隔符为界，
+        // 隔开后档位是一组、自定义是另一组。选了自定义时档位那组一个都没 checked，
+        // Chromium 会把组内第一项（「关闭」）渲染成选中 —— 两个圆点同时亮，
+        // 而且谎报当前规则是"关闭"。合成一组才有"有且只有一个选中"的语义。（实测踩过）
+        {
+          // 自定义值必须写在标签上 —— 子菜单展开后父项的「（3 天）」被盖住，
+          // 只剩一个光秃秃的「自定义…」，看不出当前到底是几小时。
+          label: PURGE_PRESETS.includes(Number(settings.autoPurgeHours))
+            ? '自定义…'
+            : '自定义（当前 ' + formatPurgeHours(settings.autoPurgeHours) + '）…',
+          type: 'radio',
+          checked: !PURGE_PRESETS.includes(Number(settings.autoPurgeHours)),
+          click: () => {
+            if (win && !win.isDestroyed()) {
+              // 连同格式化好的文案一起送过去：格式化只在主进程有一份，
+              // 渲染层再抄一份的话，改了显示规则必然漏掉其中一处。
+              win.webContents.send('board:askPurgeThreshold', {
+                hours: Number(settings.autoPurgeHours) || 0,
+                label: formatPurgeHours(settings.autoPurgeHours),
+              })
+            }
+          },
+        },
+      ],
     },
     { type: 'separator' },
     {

@@ -151,7 +151,13 @@
   .health { padding: 4px 10px 8px; color: var(--c-asking); font-size: 12px; }
   .health:empty { display: none; }
 
-  .wrap { flex: 1; overflow: auto; margin: 0 10px; border: 1px solid var(--border); }
+  /* 列表区左右贴边、不画边框。
+     Why：顶栏底线、详情面板顶线、底部状态栏顶线三条分隔线都是通栏的，
+     列表却带 margin + 四边边框，成了一个左右悬空的方框，和上下对不齐（实测量过：
+     分隔线在 x=0..W，列表框在 x=11..W-17）。而且它的上下边框紧贴那两条通栏线，
+     等于各画了两条 1px 重叠的线。
+     去掉之后全窗口统一成"通栏分层"：横线负责分层，内容靠 padding 对齐到 10px。 */
+  .wrap { flex: 1; overflow: auto; }
   /* table-layout: fixed —— 列宽由 colgroup 说话。
      自动布局下浏览器会按内容重算宽度，拖出来的宽度当场被吃掉。 */
   table { width: 100%; border-collapse: collapse; table-layout: fixed; }
@@ -178,6 +184,11 @@
   .sorthint { color: var(--muted); font-size: 12px; }
   tbody td { padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap;
              overflow: hidden; text-overflow: ellipsis; }
+  /* 首末列单独补到 10px，让表格内容的左右边界与顶栏文字、详情面板对齐。
+     不动 padding 那条通用规则 —— 那会把每一列的列间距都加宽 2px，
+     白白吃掉本就紧张的文字宽度（列宽是拖出来记住的，不该被样式改动偷走）。 */
+  thead th:first-child, tbody td:first-child { padding-left: 10px; }
+  thead th:last-child, tbody td:last-child { padding-right: 10px; }
   tbody tr:hover { background: var(--hover) !important; }
   tbody tr.sel { background: var(--sel) !important; }
   /* 颜色信号集中在状态列的文字上，行底色只做极淡的暗示 ——
@@ -342,6 +353,34 @@
     display: none; align-items: center; justify-content: center; z-index: 20;
   }
   .mask.on { display: flex; }
+
+  /* 阈值输入对话框。复用 .mask/.sheet 的遮罩与卡片，只把宽度收窄 ——
+     Electron 的原生对话框没有文本输入（showMessageBox 只有按钮），
+     window.prompt 又被禁用，任意时长只能自绘这一条路。 */
+  .sheet.narrow { width: min(420px, 92vw); }
+  .sheet .form { padding: 16px 22px 18px; display: flex; flex-direction: column; gap: 12px; }
+  .sheet .form .lead { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.65; }
+  /* 当前生效的规则。必须显眼：输入框里预填的可能只是个起点
+     （当前为"关闭"时预填 3 天），不写出来会被读成"现在就是 3 天" */
+  .sheet .form .cur { margin: 0; font-size: 13px; color: var(--fg); }
+  .sheet .form .cur b { font-weight: 600; }
+  .sheet .form .frow { display: flex; align-items: center; gap: 8px; }
+  .sheet .form input, .sheet .form select {
+    font: inherit; padding: 4px 8px; color: var(--fg);
+    background: var(--chip-bg); border: 1px solid var(--track-line); border-radius: 5px;
+  }
+  .sheet .form input { width: 92px; }
+  .sheet .form .err { margin: 0; font-size: 12px; color: var(--c-asking); min-height: 16px; }
+  .sheet .form .btns { display: flex; gap: 8px; justify-content: flex-end; }
+  .sheet .form .btns .grow { flex: 1; }
+  .sheet .form button {
+    font: inherit; padding: 4px 12px; cursor: pointer;
+    background: var(--chip-bg); color: var(--fg);
+    border: 1px solid var(--track-line); border-radius: 5px;
+  }
+  .sheet .form button:hover { background: var(--head-hover); }
+  .sheet .form button.primary { background: var(--c-running); border-color: var(--c-running); color: #fff; }
+  .sheet .form button.primary:hover { filter: brightness(1.08); }
   .sheet {
     width: min(820px, 94vw); max-height: 88vh;
     display: flex; flex-direction: column; overflow: hidden;
@@ -455,6 +494,36 @@
       <button class="x" id="helpClose" title="关闭（Esc）">✕</button>
     </header>
     <div class="body" id="helpBody"></div>
+  </div>
+</div>
+
+<div class="mask" id="purgeMask">
+  <div class="sheet narrow">
+    <header>
+      <h2>自动删除残留记录</h2>
+      <span class="sub">超过这个时长就删掉</span>
+      <button class="x" id="purgeX" title="取消（Esc）">✕</button>
+    </header>
+    <div class="form">
+      <p class="cur" id="purgeCur"></p>
+      <p class="lead">残留记录 = 会话早没了、Claude Code 也不再登记它，只剩看板这边一条没人清的观测记录。
+        删掉不可撤销，但它只是观测记录，删了不影响任何会话。</p>
+      <div class="frow">
+        <input id="purgeNum" type="number" min="1" step="1">
+        <select id="purgeUnit">
+          <option value="1">小时</option>
+          <option value="24">天</option>
+        </select>
+        <span class="lead" id="purgeEcho"></span>
+      </div>
+      <p class="err" id="purgeErr"></p>
+      <div class="btns">
+        <button id="purgeOff" class="grow" style="flex:none">关闭自动删除</button>
+        <span class="grow"></span>
+        <button id="purgeCancel">取消</button>
+        <button id="purgeOk" class="primary">确定</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -912,6 +981,9 @@ function ipcRow(r) {
   return {
     sessionId: r.sessionId, cwd: r.cwd, label: r.label, hidden: !!r.hidden,
     title: r.title, host: r.host, regCwd: r.regCwd,
+    // orphan 决定右键菜单里出不出现「删除记录」。漏了它恒为 undefined，
+    // 那一项永远不出现 —— 「取消隐藏」当年就是这么少了一个字段查了半天。
+    orphan: !!r.orphan,
   }
 }
 
@@ -936,6 +1008,13 @@ document.querySelector('.wrap').addEventListener('mousedown', (e) => {
   }
 })
 document.addEventListener('keydown', (e) => {
+  // 阈值对话框开着时全部按键都归它：Esc 关掉，其余一律不往下传。
+  // 关键是 Delete —— 你在输入框里删数字，穿透下去就把选中的行给隐藏了
+  // （自绘弹窗不像原生对话框那样天然吃掉按键，必须自己挡）。
+  if (purgeMask.classList.contains('on')) {
+    if (e.key === 'Escape') closePurge()
+    return
+  }
   // 帮助面板开着时 Esc 先关它 —— 否则会一路穿透到"取消选择"，
   // 面板还盖在上面，人会以为按键没反应。
   if (e.key === 'Escape' && mask.classList.contains('on')) { closeHelp(); return }
@@ -977,6 +1056,79 @@ tb.addEventListener('contextmenu', (e) => {
 // 排序改成点表头（升 → 降 → 默认），原来的下拉框已经移除 ——
 // 两套排序入口并存只会让人猜哪个说话。「需求度」那一档 = 点「状态」列。
 document.getElementById('btnSettings').addEventListener('click', () => window.board.showSettingsMenu())
+
+// ---- 自动删除阈值：自定义时长对话框 ----
+//
+// 设置菜单里点「自定义…」由主进程发消息过来（原生菜单没有输入控件）。
+// 这里只负责收一个数字 + 单位，校验与夹取在主进程的 applySetting 里统一做 ——
+// 菜单档位也走那条路，规则只写一次。
+const purgeMask = document.getElementById('purgeMask')
+const purgeNum = document.getElementById('purgeNum')
+const purgeUnit = document.getElementById('purgeUnit')
+const purgeErr = document.getElementById('purgeErr')
+const purgeEcho = document.getElementById('purgeEcho')
+const purgeCur = document.getElementById('purgeCur')
+const MAX_PURGE_HOURS = 24 * 365
+
+function openPurge(payload) {
+  const h = Math.max(0, Number(payload && payload.hours) || 0)
+  // 当前生效的规则单独写一行。不能靠输入框里的数字表达 ——
+  // 当前是「关闭」时那里预填的是起点值（3 天），会被读成"现在就是 3 天"
+  purgeCur.textContent = ''
+  purgeCur.appendChild(document.createTextNode('当前：'))
+  purgeCur.appendChild(el('b', null, (payload && payload.label) || '关闭'))
+  purgeCur.appendChild(document.createTextNode(h > 0 ? '后自动删除' : '，不会自动删除'))
+  // 关闭状态没有可回填的值，给个 3 天当起点（和默认档一致）
+  const seed = h > 0 ? h : 72
+  // 整天数用「天」回填，否则按小时 —— 你上次填 36 小时，再打开还是 36 小时，
+  // 不会被显示成「1 天 12 小时」逼你换算
+  if (seed % 24 === 0) { purgeNum.value = seed / 24; purgeUnit.value = '24' }
+  else { purgeNum.value = seed; purgeUnit.value = '1' }
+  purgeErr.textContent = ''
+  echoPurge()
+  purgeMask.classList.add('on')
+  purgeNum.focus()
+  purgeNum.select()
+}
+
+function closePurge() { purgeMask.classList.remove('on') }
+
+// 选「天」时把总小时数回显出来：阈值最终按小时算，让这一步可见，
+// 免得填完还要自己心算 3 天到底是多少小时
+function echoPurge() {
+  const n = Number(purgeNum.value)
+  const unit = Number(purgeUnit.value)
+  purgeEcho.textContent = (unit === 24 && Number.isFinite(n) && n > 0) ? '= ' + (n * 24) + ' 小时' : ''
+}
+
+function commitPurge() {
+  const n = Number(purgeNum.value)
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+    purgeErr.textContent = '请填一个 ≥ 1 的整数'
+    return
+  }
+  const hours = n * Number(purgeUnit.value)
+  if (hours > MAX_PURGE_HOURS) {
+    purgeErr.textContent = '最长 365 天（' + MAX_PURGE_HOURS + ' 小时）'
+    return
+  }
+  window.board.setSetting('autoPurgeHours', hours)
+  closePurge()
+}
+
+purgeNum.addEventListener('input', () => { purgeErr.textContent = ''; echoPurge() })
+purgeUnit.addEventListener('change', echoPurge)
+purgeNum.addEventListener('keydown', (e) => { if (e.key === 'Enter') commitPurge() })
+document.getElementById('purgeOk').addEventListener('click', commitPurge)
+document.getElementById('purgeCancel').addEventListener('click', closePurge)
+document.getElementById('purgeX').addEventListener('click', closePurge)
+document.getElementById('purgeOff').addEventListener('click', () => {
+  window.board.setSetting('autoPurgeHours', 0)
+  closePurge()
+})
+// 点遮罩空白处关掉，与帮助面板一致
+purgeMask.addEventListener('mousedown', (e) => { if (e.target === purgeMask) closePurge() })
+window.board && window.board.onAskPurgeThreshold(openPurge)
 // ---- 帮助面板 ----
 
 const mask = document.getElementById('mask')
@@ -1044,13 +1196,21 @@ async function buildHelp() {
 
   const op = section('操作')
   row(op, '双击行', '在文件管理器打开该会话的工作目录')
-  row(op, '右键', '菜单：隐藏 or 取消隐藏 / 复制路径 / 打开目录')
+  row(op, '右键', '菜单：隐藏 or 取消隐藏 / 删除记录 / 复制路径 / 打开目录')
   const del = row(op, '', '隐藏这一条 —— 不等于关会话。在 ⚙ 设置里勾「显示已隐藏」可找回，'
     + '而且该会话下次有动静会自己回到列表。在已隐藏的行上再按一次 = 取消隐藏')
   del.firstChild.appendChild(el('kbd', null, 'Delete'))
   const esc = row(op, '', '取消选择 / 关闭本面板')
   esc.firstChild.appendChild(el('kbd', null, 'Esc'))
-  row(op, '⚙ 设置', '置顶 / 响铃 / 通知 / 显示已隐藏 / 开机自启 / 批量收起，'
+  row(op, '删除记录', '和隐藏是两件事：隐藏留着数据、还能找回；删除是把这条观测记录真的删掉，'
+    + '不可撤销。只在「残留记录」上出现 —— 会话早没了、Claude Code 也不再登记它，'
+    + '只剩看板这边一条记录没人清（强杀 / 直接关终端不会触发结束事件）。'
+    + '别的行删不掉，所以菜单里根本不给这一项')
+  row(op, '自动删除残留记录', '⚙ 设置里选常用档（关闭 / 6 小时 / 1 天 / 3 天 / 7 天），'
+    + '或点「自定义…」按小时 / 天填任意时长（1 小时 ~ 365 天）。默认 3 天。'
+    + '它跟着刷新走（约每 1.5 秒一次），所以看板关着的时候不清理 —— '
+    + '下次打开的第一帧会把欠的一次性补上')
+  row(op, '⚙ 设置', '置顶 / 响铃 / 通知 / 显示已隐藏 / 开机自启 / 批量收起 / 自动删除残留记录，'
     + '以及「用量显示设置（5h / 周）」—— 顶部额度柱子的开启引导，随时能再打开')
 
   helpBody.appendChild(el('h3', null, '柱子怎么读 · 上下文列与顶部额度共用同一套'))

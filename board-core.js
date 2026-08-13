@@ -695,6 +695,12 @@ function getHealthIssues() {
 function buildRows(opts) {
   const sortIndex = (opts && opts.sortIndex) || 0
   const showFolded = !!(opts && opts.showFolded)
+  // 残留记录自动删除的阈值（小时）。0 = 关闭，也是**不传时的默认** ——
+  // 所以 `node board-core.js` 自检、以及任何没显式开启的调用都不会删数据。
+  // Why 用小时不用天：用户可以填任意时长，天只是界面上的一个输入单位，
+  // 落到这里统一成小时，数据层不认识"天"这个概念。
+  const autoPurgeHours = Math.max(0, Number(opts && opts.autoPurgeHours) || 0)
+  const autoPurgeMs = autoPurgeHours * 60 * 60 * 1000
 
   const now = Date.now()
   const reg = readRegistry()
@@ -728,6 +734,21 @@ function buildRows(opts) {
   for (const id of ids) {
     const st = stateBy.get(id)
     const rg = reg.get(id)
+
+    // 自动删除残留记录：注册表已无此 id，且它最后一次有动静已过阈值 -> 真删 state 文件。
+    //
+    // Why 需要这一条：`SessionEnd` 在强杀 / 直接关终端 / 关机时根本不触发（已知硬限制），
+    // 那些会话的 state 文件会一直留着，日积月累堆成一屏「已关闭」。右键「删除记录」
+    // 治的是眼前这一条，这里治的是长期堆积 —— 两个入口共用 isOrphan 与同一个删除动作。
+    //
+    // 用 updated_ms（最后一次 hook 事件）而不是文件 mtime 算年龄：判"这个会话多久没动静"
+    // 是业务问题，mtime 会被拷贝 / 备份 / 同步工具改写。读不到 updated_ms 就不删 ——
+    // 宁可留一条脏记录让你手动删，也不拿判不准的年龄去做不可撤销的事。
+    if (autoPurgeMs > 0 && st && isOrphan(reg, regUsable, id)) {
+      const lastAct = Number(st.updated_ms) || 0
+      if (lastAct > 0 && now - lastAct > autoPurgeMs) { purgeRecord(id); continue }
+    }
+
     const cwd = (st && st.cwd) || (rg && rg.cwd) || ''
 
     let tp = (st && st.transcript_path) || ''
@@ -905,6 +926,10 @@ function buildRows(opts) {
       // 否则一条被收起来的死会话会被记成"还活着"。
       baseEff,
       hidden: eff === 'hidden',
+      // 这一行的 state 文件能不能被真删（注册表已经没有它了）。
+      // 界面靠它决定右键菜单里出不出现「删除记录」—— 删不掉的行干脆不给入口，
+      // 免得点下去没反应还得解释为什么。判据由数据层单一定义，界面不自己算。
+      orphan: isOrphan(reg, regUsable, id),
       rank: meta.rank,
       statusText,
       accent: meta.accent,
@@ -979,6 +1004,43 @@ function buildRows(opts) {
   }
 }
 
+// 「残留记录」判据：注册表里已经没有这个 id，只剩 state 文件这半边。
+//
+// 一行是否存在 = 注册表 ∪ state 文件。注册表那半边空了之后，删掉 state 文件
+// 这一行就再也回不来 —— 这是**唯一**能真删的情形，也正是「删除记录」与
+// 「隐藏」的分界（隐藏靠墓碑、绝不删数据，见 CLAUDE.md 铁律 6）。
+// 注册表里还有条目的行删 state 没用，下一帧原地重建，那是同一条铁律的原始症状。
+//
+// `regUsable` 是必须死守的护栏：注册表整体读不到时（目录空 / 权限 / Claude Code
+// 换实现）每一行的 rg 都是 undefined，这个判据会全线假阳性 —— 不守这一条，
+// 一次读取失败就足以把整个 state/ 清空。判据只此一处，界面层不许自己算。
+function isOrphan(reg, regUsable, id) {
+  return regUsable && !reg.has(String(id))
+}
+
+// 删除记录：把这个会话的观测记录（state 文件）真的删掉，**不可撤销**。
+//
+// 与 removeRecord（隐藏）互补而不是替代：隐藏留着数据、勾「显示全部」能找回、
+// 该会话下次有动静会自己回来；删除只对残留记录成立，删完并集两半都空，永久消失。
+//
+// 判据在这里重读注册表自己复核，**不信调用方传进来的状态** ——
+// 右键菜单拿的是上一帧的行快照，点下去的那一刻该会话可能刚被 --resume 拉起来。
+function purgeRecord(sid) {
+  if (!sid) return false
+  const id = String(sid)
+  const reg = readRegistry()
+  if (!isOrphan(reg, reg.size > 0, id)) return false
+
+  let ok = false
+  try { fs.unlinkSync(path.join(STATE_DIR, id + '.json')); ok = true } catch (_) { }
+
+  // 墓碑一并清掉。不清也会被下一帧的墓碑 GC 收走，但那要等到下次 buildRows，
+  // 中间这段时间 hidden.json 里躺着一条指向已不存在的行的记录 —— 顺手清干净。
+  const hidden = readHidden()
+  if (hidden[id] !== undefined) { delete hidden[id]; writeHidden(hidden); ok = true }
+  return ok
+}
+
 // 把一条隐藏起来。
 // 语义：记一条"我不想再看见它"的意图，**不删任何数据** ——
 // 摘要/标题/耗时都留着，勾「显示全部」还能找回来，
@@ -1035,7 +1097,7 @@ module.exports = {
   // 靠等真任务出现来验证既慢又抓不准时机。
   countActiveSubwork,
   buildRows, getLastExchange, getHealthIssues, getMissingHooks, statusLegend,
-  removeRecord, unhideRecord, clearStaleRecords, formatDuration,
+  removeRecord, unhideRecord, purgeRecord, clearStaleRecords, formatDuration,
   // 用量快照的读取与路径由数据层单一定义，界面层/引导层都从这里取 ——
   // 各自硬编码一份路径的话，改一处就会静默错位（引导写 A、看板读 B）。
   readUsageWindows, readSessionMeta, USAGE_SNAPSHOT, HUD_DIR, HUD_CONTEXT_CACHE_DIR,

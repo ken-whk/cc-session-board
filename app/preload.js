@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('board', {
   getSessionMeta: (transcript) => ipcRenderer.invoke('board:getSessionMeta', transcript),
   removeRecord: (sid) => ipcRenderer.invoke('board:removeRecord', sid),
   unhideRecord: (sid) => ipcRenderer.invoke('board:unhideRecord', sid),
+  // 删除记录 = 真删 state 文件，不可撤销；只对残留记录成立（判据在数据层）
+  purgeRecord: (sid) => ipcRenderer.invoke('board:purgeRecord', sid),
   clearStale: () => ipcRenderer.invoke('board:clearStale'),
   openFolder: (dir) => ipcRenderer.invoke('board:openFolder', dir),
   // 切到会话所在的终端窗口。传的是裁剪过的行（同右键菜单那份），
@@ -25,6 +27,9 @@ contextBridge.exposeInMainWorld('board', {
   openHudGuide: () => ipcRenderer.invoke('board:openHudGuide'),
   // 通知点开 -> 主进程叫出窗口并让页面选中对应会话
   onFocusRow: (cb) => ipcRenderer.on('board:focusRow', (_e, sid) => cb(sid)),
+  // 设置菜单点「自定义…」-> 页面弹自绘对话框收数字（原生菜单没有输入控件）。
+  // 传的是 {hours, label}：label 由主进程格式化好，渲染层不再抄一份换算规则。
+  onAskPurgeThreshold: (cb) => ipcRenderer.on('board:askPurgeThreshold', (_e, payload) => cb(payload)),
   copyPath: (dir) => ipcRenderer.invoke('board:copyPath', dir),
   setSetting: (key, value) => ipcRenderer.invoke('board:setSetting', key, value),
   // 右键菜单走主进程弹原生菜单 —— 页面里的 window.prompt() 被 Electron 禁用
