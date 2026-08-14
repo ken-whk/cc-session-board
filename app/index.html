@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
-<title>Claude 会话看板</title>
+<title>Claude Code 会话看板</title>
 <style>
   /* 字体各平台取各自的系统 UI 字体，别硬指定某一款 —— Mac 上没有微软雅黑 */
   /* 主题变量。深色不是"把白色反过来"就完事 —— 状态色、柱子里的数字、
@@ -29,6 +29,10 @@
     --imminent-fg: #0d47a1;
     --hover: #f0f4f8;
     --sel: #d6e8f7;
+    /* 归档面板用：强调色 + 它的淡底。主窗口原先没有这两个变量，
+       归档面板嵌进来后不再单独维护一套配色（也因此跟着「手动锁定深浅色」走）。 */
+    --accent: #1565c0;
+    --accent-soft: #e8f1fb;
     --head-bg: #f7f7f7;
     --head-hover: #eef1f4;
     --border: #dddddd;
@@ -65,6 +69,8 @@
     --imminent-fg: #90caf9;
     --hover: #24292e;
     --sel: #2c3e50;
+    --accent: #4a9eff;
+    --accent-soft: #1d3a5c;
     --head-bg: #23272b;
     --head-hover: #2b3035;
     --border: #33383d;
@@ -123,8 +129,19 @@
   body.overlay .bar .no-drag { -webkit-app-region: no-drag; }
   body.overlay .bar button { padding: 2px 9px; }
   /* 标题栏里的应用名：原生标题文字被藏掉了，不补一个窗口会显得没头 */
-  .apptitle { font-weight: 600; white-space: nowrap; }
-  body:not(.overlay) .apptitle { display: none; }
+  /* 视图 tab。放在自绘标题栏里而不是单开一行：窗口默认只有 620px 高，
+     再占 28px 会直接吃掉一行会话。第一个 tab 同时充当应用名 ——
+     原来那个 .apptitle 就是干这个的，合并掉不必两处都占位。 */
+  .tabs { display: flex; gap: 2px; flex: none; }
+  .tab {
+    font: inherit; font-weight: 600; white-space: nowrap; cursor: pointer;
+    padding: 3px 10px; border: 1px solid transparent; border-radius: 5px;
+    background: transparent; color: var(--muted-strong);
+  }
+  .tab:hover { background: var(--head-hover); }
+  /* 选中态必须明显 —— 之前只有一个切换按钮、看不出"我在哪个视图"，
+     这正是要 tab 的原因，所以别把它做得含糊 */
+  .tab.on { background: var(--sel); color: var(--fg); border-color: var(--border); }
   .bar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
   /* 按钮必须跟着主题走。浏览器默认按钮在深色下是一块白，
      比不做深色更难看 —— 主题化不能只做背景和文字。 */
@@ -135,11 +152,13 @@
   }
   .bar button:hover { background: var(--head-hover); }
   .bar button:active { background: var(--track-bg); }
-  .stat { color: var(--fg); }
+  /* 现在住在状态栏里，字号跟着那一行走 */
+  .stat { color: var(--fg); font-size: 12px; }
   .stat b { font-weight: 600; }
   .stat b.hot { color: var(--c-asking); }
   .grow { flex: 1; }
   .offhint { color: var(--muted); font-size: 12px; }
+  .foldhint { color: var(--muted); font-size: 12px; }
 
   /* health 从整行散文降级为一颗灯。
      常态那句"hook 链路正常（4 个事件已注册）· 会话注册表可用…"每次启动都一样，
@@ -378,6 +397,25 @@
   .sheet .form button:hover { background: var(--head-hover); }
   .sheet .form button.primary { background: var(--c-running); border-color: var(--c-running); color: #fff; }
   .sheet .form button.primary:hover { filter: brightness(1.08); }
+
+  /* 上报提醒：整点九宫格。
+     用格子而不是一串 checkbox —— 24 个 checkbox 竖着排要滚动，而"我想在
+     晚上那几个点被叫"是个一眼扫过去就该点完的决定。 */
+  .sheet .form .hgrid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
+  .sheet .form .hgrid button {
+    padding: 5px 0; font-variant-numeric: tabular-nums; text-align: center;
+  }
+  .sheet .form .hgrid button.on {
+    background: var(--c-running); border-color: var(--c-running); color: #fff;
+  }
+  .sheet .form .hgrid button.on:hover { filter: brightness(1.08); }
+  /* 「开启」关掉时整块压暗但**仍可点** —— 先挑好时间再开开关是很自然的顺序，
+     禁用掉会逼人倒过来操作 */
+  .sheet .form .dim { opacity: .45; }
+  .sheet .form .chk { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+  .sheet .form .chk input { width: auto; margin: 0; }
+  /* 另加的非整点时间：这行要占满宽度，不用上面 92px 的窄输入框 */
+  .sheet .form .frow input.wide { width: auto; flex: 1; }
   .sheet {
     width: min(820px, 94vw); max-height: 88vh;
     display: flex; flex-direction: column; overflow: hidden;
@@ -444,14 +482,225 @@
     border: 0; background: transparent; padding: 0 2px; margin-left: 4px;
     font: inherit; color: var(--link); text-decoration: underline; cursor: pointer;
   }
+  /* ---- 上报归档面板（嵌在主窗口里，不再另开 OS 窗口）----
+     Why 嵌进来而不是独立 BrowserWindow：独立窗口会在任务栏多占一个条目，
+     而这是个偶尔看一眼的面板、不值得一个窗口。顺带修掉一个隐患 ——
+     原先那个独立页面的深浅色只跟 prefers-color-scheme，而主窗口支持
+     手动锁定 light/dark，两者会不一致；现在共用同一套变量。
+     所有 id / class / 函数一律加 `ar` 前缀：主窗口已经有 clearDetail()、
+     detail 等同名符号，不加前缀会静默撞车。 */
+  /* 面板是 body 这个纵向 flex 里的一个**兄弟槽位**，不是绝对定位的覆盖层。
+     踩过两个坑，都在这两条规则里：
+     ① `#arPanel { display:flex }` 会压过 `[hidden]` 的 display:none（UA 样式表
+        优先级最低），结果面板一直显示 —— 必须显式写 [hidden] 那条。
+     ② 用 `position:absolute; inset:0` 覆盖时，body 没有定位祖先，
+        它会相对视口铺满、把工具栏一起盖掉，于是"连列表都看不到了"。 */
+  #arPanel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  #arPanel[hidden] { display: none; }
+  /* 打开归档 = 换视图：把列表和底部详情让出去，而不是盖在它们上面 */
+  body.archive-on .wrap,
+  body.archive-on .detail { display: none; }
+  /* 排序提示 / 折叠提示讲的是列表，归档视图下它们是无主的信息 */
+  body.archive-on .sorthint,
+  body.archive-on .offhint { display: none; }
+  .arbar {
+    flex: none; display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-bottom: 1px solid var(--line);
+  }
+  .arbar .t { font-weight: 600; }
+  .arbar .grow { flex: 1; }
+  .arhint { color: var(--muted); font-size: 12px; }
+  .arwarn { color: var(--imminent-fg); }
+  #arMain { flex: 1; display: flex; min-height: 0; }
+  #arLeft { width: 380px; flex: none; border-right: 1px solid var(--line); overflow: auto; }
+  #arRight { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .arhead {
+    flex: none; padding: 7px 12px; font-weight: 600;
+    border-bottom: 1px solid var(--line);
+  }
+  #arDetail { flex: 1; overflow: auto; min-height: 0; }
+  /* 账号：自绘下拉（原生 datalist 条目多时在 Windows 上滚不动） */
+  .arcombo { position: relative; display: inline-block; }
+  .arcombo input {
+    font: inherit; padding: 2px 7px; width: 140px;
+    border: 1px solid var(--border); border-radius: 4px;
+    background: var(--bg); color: var(--fg);
+  }
+  .arcombo input:focus { outline: none; border-color: var(--accent); }
+  #arUList {
+    position: absolute; top: calc(100% + 3px); left: 0; z-index: 40;
+    min-width: 100%; max-height: 260px; overflow-y: auto;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .18);
+  }
+  .aruitem { padding: 5px 10px; cursor: pointer; white-space: nowrap; font-size: 12px; }
+  .aruitem:hover, .aruitem.cur { background: var(--hover); }
+  .aruitem.cur { font-weight: 600; }
+  .aruhead {
+    padding: 5px 10px; font-size: 11px; color: var(--muted);
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg);
+  }
+  /* 日历。配色分工：淡底+accent 数字 = 报过；实心 accent = 当前查看。
+     只有选中用强色 —— 把"报过"做成饱和色会让整月像热力图，且强色被占掉后
+     选中态只能再找更抢眼的画法，越叠越糟。 */
+  .arcal { padding: 12px 14px 14px; }
+  .arcalbar { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .arcalbar .m { flex: 1; text-align: center; font-weight: 600; font-size: 13px; }
+  .argrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+  .arwd {
+    text-align: center; font-size: 11px; color: var(--muted);
+    padding-bottom: 6px; margin-bottom: 2px; border-bottom: 1px solid var(--line);
+  }
+  .arcell {
+    height: 40px; border-radius: 6px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1px; line-height: 1.1; font-variant-numeric: tabular-nums; color: var(--fg);
+  }
+  .arcell.out { color: var(--fg-dim); }
+  .arcell:not(.has):not(.on):hover { background: var(--hover); }
+  .arcell.has { background: var(--accent-soft); }
+  .arcell.out.has { background: var(--panel); }
+  .arcell.on, .arcell.on:hover { background: var(--accent); }
+  .arcell.on .arn, .arcell.on .ard { color: #fff; }
+  .ard { font-size: 13px; }
+  .arn { font-size: 10px; color: var(--accent); font-weight: 600; }
+  .arcell.out .arn { color: var(--muted); font-weight: 400; }
+  .arcell.today .ard { font-weight: 700; box-shadow: inset 0 -2px 0 var(--accent); }
+  .arcell.on.today .ard { box-shadow: inset 0 -2px 0 #fff; }
+  .arsum { margin-top: 12px; font-size: 12px; color: var(--muted-strong); }
+  .arlegend {
+    margin-top: 6px; font-size: 11px; color: var(--muted);
+    display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  }
+  .arsw {
+    width: 12px; height: 12px; border-radius: 3px; flex: none;
+    background: var(--accent-soft); border: 1px solid var(--border); display: inline-block;
+  }
+  .arsw.sel { background: var(--accent); border-color: var(--accent); }
+  /* 挂载引导：只在 NAS 读不到时出现 */
+  .armount {
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .armount p { margin: 0 0 6px; font-size: 12px; color: var(--muted-strong); }
+  .armount .row2 { display: flex; gap: 8px; margin: 8px 0 6px; flex-wrap: wrap; }
+  .arrow { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .arrow:hover { background: var(--hover); }
+  .art1 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .arproj { font-weight: 600; }
+  .arcnt { color: var(--muted); font-size: 12px; }
+  .artag {
+    font-size: 11px; padding: 0 5px; border-radius: 3px;
+    border: 1px solid var(--badge-line); color: var(--badge-fg);
+  }
+  .arprompt { color: var(--muted-strong); font-size: 12px; margin-top: 2px; }
+  .arsid {
+    color: var(--muted); font-size: 11px;
+    font-family: ui-monospace, Consolas, monospace; word-break: break-all;
+  }
+  .arempty { padding: 18px 14px; color: var(--muted); }
+
+  /* ---- 自绘设置面板 ----
+     Why 不用原生菜单：原生菜单**点任何一项都会整个关闭**（Win32 TrackPopupMenu /
+     macOS NSMenu 的行为，Electron 没有"保持打开"的开关），要连改几项就得反复
+     重新点开；而且里面放不了输入框 —— 域账号、提醒时间因此被迫走自绘对话框
+     （自动删除的"自定义时长"就是这么被逼出来的先例）。
+     面板一次解决这三件：不关、可连点、能放输入控件。
+     全部 st 前缀：这个文件已经有 detail / clearDetail 等符号，撞名会静默出错。 */
+  /* 整页视图，和归档面板同一个套路：body 纵向 flex 里的一个兄弟槽位。
+     **不进 tab** —— tab 表示"你在浏览哪个内容"，设置是配置界面、不是内容，
+     并列进去会让 tab 的语义变浑。入口仍是 ⚙ 按钮，出口是面板里的「完成」。 */
+  #stPanel { flex: 1; min-height: 0; overflow: auto; font-size: 12px; }
+  #stPanel[hidden] { display: none; }
+  body.settings-on .wrap,
+  body.settings-on .detail,
+  body.settings-on #arPanel { display: none; }
+  /* 吸顶的那条通栏线交给外层，内容限宽居中与正文对齐。
+     不能在 sticky 元素上直接 margin:auto —— 它的包含块是滚动容器，居中会失效。 */
+  .sthead {
+    position: sticky; top: 0; z-index: 1; background: var(--bg);
+    border-bottom: 1px solid var(--line);
+  }
+  .sthead > .inner {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 18px; max-width: 656px; margin: 0 auto;
+    font-weight: 600; font-size: 13px;
+  }
+  .sthead .grow { flex: 1; }
+  /* 单列竖排。分过栏，但设置项的关系是「一组一组读下去」，分栏会让阅读顺序
+     在左右两列之间来回跳。宽度封顶：拉满 1000+px 时一行太长，扫起来要横跨半屏。 */
+  /* 居中而不是靠左：整页宽 1000+px、内容只占 620px，靠左会让右边空掉一大片，
+     视线也要一直偏在屏幕左侧。 */
+  .stbody {
+    padding: 6px 18px 28px; margin: 0 auto; max-width: 620px;
+    display: flex; flex-direction: column;
+  }
+  /* 组标题要压得住它下面那一组：比行标题(13px)大一号、用正文色而不是灰色。
+     原来 12px 灰字比行标题还弱，扫下来分不出哪是分组、哪是设置项。
+     层级：组标题 15px 粗 > 行标题 13px > 说明 11px 灰。 */
+  .stgroup {
+    padding: 26px 0 8px; color: var(--fg); font-size: 15px; font-weight: 600;
+  }
+  .stsec:first-child .stgroup { padding-top: 8px; }
+  /* 行结构：标签在左（可带一行小灰字说明），控件靠右，每行一条分隔线。
+     原先是「复选框 + 标签」全挤在左边 —— 那样每行左端都是一个方框，
+     视线扫下来只看到一列方框、看不出这行在管什么，所以显得机械。 */
+  .strow {
+    display: flex; align-items: center; gap: 14px;
+    padding: 11px 2px; border-bottom: 1px solid var(--line);
+  }
+  .strow:last-child { border-bottom: none; }
+  .stmain { flex: 1; min-width: 0; }
+  .sttitle { font-size: 13px; }
+  /* 说明只在「光看标签会误解」的行才写 —— 每行都挂一句会把版面变成说明书 */
+  .stdesc { color: var(--muted); font-size: 11px; margin-top: 2px; line-height: 1.4; }
+  .stctl { flex: none; display: flex; align-items: center; gap: 8px; }
+  /* 开关用滑块而不是复选框：复选框在设置项语境下表达的是「勾选一批」，
+     而这些是各自独立的开/关状态，滑块语义更准，也更容易一眼看出当前值。 */
+  .stsw { position: relative; width: 38px; height: 21px; flex: none; }
+  .stsw input {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    margin: 0; opacity: 0; cursor: pointer;
+  }
+  .stsw .track {
+    position: absolute; inset: 0; border-radius: 999px;
+    background: var(--border); transition: background .15s;
+  }
+  .stsw .knob {
+    position: absolute; top: 2px; left: 2px; width: 17px; height: 17px;
+    border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
+    transition: left .15s; pointer-events: none;
+  }
+  .stsw input:checked ~ .track { background: #34c759; }
+  .stsw input:checked ~ .knob { left: 19px; }
+  .stsw input:focus-visible ~ .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* 互斥选项做成分段控件、靠右对齐 —— 同组候选一眼看全，比下拉少一次点击 */
+  .stseg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .stseg button {
+    font: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer;
+    border: none; border-left: 1px solid var(--border);
+    background: var(--bg); color: var(--muted-strong);
+  }
+  .stseg button:first-child { border-left: none; }
+  .stseg button:hover { background: var(--hover); }
+  .stseg button.on { background: var(--accent); color: #fff; }
+  .stnum {
+    font: inherit; font-size: 12px; width: 58px; padding: 3px 6px; text-align: right;
+    border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg);
+  }
+  .sttext {
+    font: inherit; font-size: 12px; width: 140px; padding: 3px 7px;
+    border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg);
+  }
 </style>
 </head>
 <body>
 
 <div class="bar">
-  <span class="apptitle">会话看板</span>
+  <span class="tabs no-drag">
+    <button class="tab on" id="tabBoard" title="并发会话列表：谁在等你、该切到哪个会话去">会话看板</button>
+    <button class="tab" id="tabArchive" title="按月看哪天报过哪些会话，并从这里发起当日上报（读 NAS；上报本身走 cc-session-nas-upload skill）">上报日历</button>
+  </span>
   <span class="sep"></span>
-  <span class="stat" id="stat"></span>
   <span class="offhint" id="offhint"></span>
   <span class="grow"></span>
   <span class="sorthint" id="sorthint"></span>
@@ -477,16 +726,133 @@
   <pre id="detail"></pre>
 </div>
 
+<!-- 上报归档面板。默认隐藏，点工具栏「上报日历」覆盖在列表区之上。
+     不另开 BrowserWindow —— 那会在任务栏多占一个条目，而这是偶尔看一眼的东西。 -->
+<div id="arPanel" hidden>
+  <div class="arbar">
+    <span class="t">上报归档</span>
+    <label class="arhint">我的账号
+      <span class="arcombo">
+        <input id="arUser" placeholder="域账号" spellcheck="false" autocomplete="off" />
+        <div id="arUList" hidden></div>
+      </span>
+    </label>
+    <span class="grow"></span>
+    <span id="arPlugin" class="arhint"></span>
+    <button id="arToday" title="开一个 Claude 会话窗口并自动输入「帮我列出今天的会话」。这类会话不落 transcript：没有上下文百分比、不会被归档、不能 --resume —— 当临时窗口用">↥ 上报当日…</button>
+    <button id="arReload">刷新</button>
+    <button id="arClose">关闭</button>
+  </div>
+  <div id="arMain">
+    <section id="arLeft">
+      <div id="arMount" class="armount" hidden></div>
+      <div id="arCal"><div class="arempty">读取中…</div></div>
+    </section>
+    <section id="arRight">
+      <div class="arhead" id="arDetailHead">选左边一个日子</div>
+      <div id="arDetail"></div>
+    </section>
+  </div>
+</div>
+
+<!-- 设置：整页视图，不进 tab（tab 表示「在浏览哪个内容」，配置界面不是内容）。 -->
+<div id="stPanel" hidden>
+  <div class="sthead"><div class="inner"><span>设置</span><span class="grow"></span><button id="stClose">完成</button></div></div>
+  <div class="stbody">
+    <section class="stsec">
+      <div class="stgroup">窗口</div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">窗口置顶</div></div>
+        <div class="stctl"><span class="stsw"><input type="checkbox" id="stTop"><span class="track"></span><span class="knob"></span></span></div>
+      </div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">开机自启</div></div>
+        <div class="stctl"><span class="stsw"><input type="checkbox" id="stLaunch"><span class="track"></span><span class="knob"></span></span></div>
+      </div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">外观</div><div class="stdesc">深浅色。跟随系统时随 Windows 的深色模式切换</div></div>
+        <div class="stctl"><span class="stseg" id="stTheme"></span></div>
+      </div>
+    </section>
+    <section class="stsec">
+      <div class="stgroup">打扰方式</div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">提醒响铃</div><div class="stdesc">会话跑完 / 开始等你时响一声</div></div>
+        <div class="stctl"><span class="stsw"><input type="checkbox" id="stSound"><span class="track"></span><span class="knob"></span></span></div>
+      </div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">系统通知</div><div class="stdesc">会话状态跃变时弹系统通知</div></div>
+        <div class="stctl"><span class="stsw"><input type="checkbox" id="stNotify"><span class="track"></span><span class="knob"></span></span></div>
+      </div>
+    </section>
+    <section class="stsec">
+      <div class="stgroup">会话上报提醒</div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">开启提醒</div><div class="stdesc">到点提醒你上报当天的会话；当天已经报过就不再提醒</div></div>
+        <div class="stctl"><span class="stsw"><input type="checkbox" id="stRemind"><span class="track"></span><span class="knob"></span></span></div>
+      </div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">提醒时间</div><div class="stdesc"><span id="stTimes"></span></div></div>
+        <div class="stctl"><button id="stTimesBtn">修改…</button></div>
+      </div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">我的域账号</div><div class="stdesc">核对「今天报过没」用的就是这个账号，填错会一直提醒</div></div>
+        <div class="stctl"><input class="sttext" id="stNasUser" placeholder="域账号" spellcheck="false" autocomplete="off"></div>
+      </div>
+    </section>
+    <section class="stsec">
+      <div class="stgroup">列表</div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">显示已隐藏 / 久候 / 已关闭</div><div class="stdesc">默认收起来，勾上后它们回到列表里</div></div>
+        <div class="stctl"><span class="stsw"><input type="checkbox" id="stFolded"><span class="track"></span><span class="knob"></span></span></div>
+      </div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">批量收起</div><div class="stdesc">把已完成 / 久候 / 已关闭的记一条「不想再看见」，不删数据</div></div>
+        <div class="stctl"><button id="stCollapse">收起来</button></div>
+      </div>
+    </section>
+    <section class="stsec">
+      <div class="stgroup">自动删除残留记录</div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">保留多久</div><div class="stdesc">会话没了、注册表也没了、只剩观测记录时，过这么久自动删掉</div></div>
+        <div class="stctl"><span class="stseg" id="stPurge"></span></div>
+      </div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">自定义时长</div><div class="stdesc">任意时长，范围 1 小时 ~ 365 天</div></div>
+        <div class="stctl"><input class="stnum" id="stPurgeNum" type="number" min="1" max="8760" step="1"><span class="stdesc">小时</span><button id="stPurgeSet">应用</button></div>
+      </div>
+    </section>
+    <section class="stsec">
+      <div class="stgroup">用量显示</div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">5h / 周用量</div><div class="stdesc">底部那两条柱子的开启引导（读 claude-hud 写出的快照）</div></div>
+        <div class="stctl"><button id="stHud">设置…</button></div>
+      </div>
+    </section>
+  </div>
+</div>
+
 <div class="statusbar">
-  <span class="hstat" id="hstat"><span class="hdot" id="hdot"></span><span id="hlabel"></span></span>
+  <!-- 顺序按**信息价值**排，不按实现顺序。
+       ① 会话计数：唯一要你行动的信号（有几个在等你），放最左（最先被读到）。
+          它讲的是会话本身、不是"列表"这个视图，所以切到归档 tab 也不该藏。
+       ② 用量：预算类信息，变化慢，看一眼就够。
+       ③ 健康灯推到最右：常态恒绿、只在异常时才有信息量，不该占最显著的位置。
+          而且真出问题（hook 链路断）时顶部会铺一整行红字，不靠这颗灯挡眼。 -->
+  <span class="stat" id="stat"></span>
+  <!-- 折叠/隐藏指标。原先「含已隐藏」挤在顶栏的"非常态提示"里、而「已折叠 N」
+       又在会话计数里 —— 同一件事被拆到两处。合并成这一个：开关状态 + 数量。 -->
+  <span class="foldhint" id="foldhint"></span>
   <span class="sep"></span>
   <span class="usage" id="usage"></span>
+  <span class="grow"></span>
+  <span class="hstat" id="hstat"><span class="hdot" id="hdot"></span><span id="hlabel"></span></span>
 </div>
 
 <div class="mask" id="mask">
   <div class="sheet" id="sheet">
     <header>
-      <h2>Claude 会话看板</h2>
+      <h2>Claude Code 会话看板</h2>
       <span class="sub">使用说明</span>
       <button class="x" id="helpClose" title="关闭（Esc）">✕</button>
     </header>
@@ -519,6 +885,40 @@
         <span class="grow"></span>
         <button id="purgeCancel">取消</button>
         <button id="purgeOk" class="primary">确定</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="remindMask">
+  <div class="sheet narrow">
+    <header>
+      <h2>上报提醒</h2>
+      <span class="sub">到点提醒你上报当天的会话</span>
+      <button class="x" id="remindX" title="取消（Esc）">✕</button>
+    </header>
+    <div class="form">
+      <label class="chk"><input type="checkbox" id="remindOn"><span>开启上报提醒</span></label>
+      <!-- 把行为如实写出来。第二句尤其重要：不写的话，在家没挂 VPN 的晚上
+           被连敲几次会被当成 bug，而它是明说过的取舍 -->
+      <p class="lead">到点先去 NAS 上核对今天有没有上报记录，<b>报过就不提醒</b>。
+        核对不上时（NAS 读不到 / 域账号没设或填错）仍然提醒，并在通知里注明没核对上 ——
+        宁可多敲你一次，也好过一个看着开着、其实不响的开关。</p>
+      <div id="remindBody">
+        <div class="hgrid" id="remindGrid"></div>
+        <div class="frow" style="margin-top:10px">
+          <span class="lead" style="flex:none">另加</span>
+          <input id="remindExtra" class="wide" spellcheck="false" autocomplete="off"
+                 placeholder="非整点，如 12:30, 17:45">
+        </div>
+      </div>
+      <p class="cur" id="remindCur"></p>
+      <p class="err" id="remindErr"></p>
+      <div class="btns">
+        <button id="remindReset" style="flex:none">恢复默认</button>
+        <span class="grow"></span>
+        <button id="remindCancel">取消</button>
+        <button id="remindOk" class="primary">确定</button>
       </div>
     </div>
   </div>
@@ -1012,6 +1412,12 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closePurge()
     return
   }
+  // 同上：提醒设置对话框开着时按键全归它。这里有个文本输入框，
+  // 不挡的话在里面按 Delete 会穿透下去把选中的行隐藏掉。
+  if (remindMask.classList.contains('on')) {
+    if (e.key === 'Escape') closeRemind()
+    return
+  }
   // 帮助面板开着时 Esc 先关它 —— 否则会一路穿透到"取消选择"，
   // 面板还盖在上面，人会以为按键没反应。
   if (e.key === 'Escape' && mask.classList.contains('on')) { closeHelp(); return }
@@ -1052,7 +1458,424 @@ tb.addEventListener('contextmenu', (e) => {
 // 留在外面的只有排序（改动频率明显更高）和帮助。
 // 排序改成点表头（升 → 降 → 默认），原来的下拉框已经移除 ——
 // 两套排序入口并存只会让人猜哪个说话。「需求度」那一档 = 点「状态」列。
-document.getElementById('btnSettings').addEventListener('click', () => window.board.showSettingsMenu())
+// 开自绘面板而不是原生菜单。原生菜单那条链路（showSettingsMenu / board:settingsMenu）
+// **刻意保留不删** —— 面板万一有问题，把这一行改回去就恢复原状。
+document.getElementById('btnSettings').addEventListener('click', () => {
+  if (stQ('stPanel').hidden) stOpen(); else stClose()
+})
+// 上报走独立窗口：它要碰 NAS（SMB），而主窗口每 1.5 秒刷新一次，
+// 两者放一起迟早有人把 NAS 读进刷新循环
+// ---- 上报归档面板（同窗口覆盖，不另开 OS 窗口）----
+//
+// 所有符号加 ar 前缀：主窗口已有 clearDetail() / detail 等同名的东西，
+// 不加前缀会静默撞车（改到一半才发现最难查）。
+const arQ = (id) => document.getElementById(id)
+const arEl = (tag, cls, text) => {
+  const n = document.createElement(tag)
+  if (cls) n.className = cls
+  if (text != null) n.textContent = text
+  return n
+}
+const arPad = (n) => String(n).padStart(2, '0')
+// coversFrom/To 是 ISO 串，只取到分钟
+const arAt = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return String(iso)
+  return arPad(d.getMonth() + 1) + '-' + arPad(d.getDate()) + ' ' + arPad(d.getHours()) + ':' + arPad(d.getMinutes())
+}
+
+let arUsers = []
+let arCurUser = ''
+let arByDate = new Map()
+let arYear = 0
+let arMonth = 0
+let arSelected = ''
+
+function arShowPlugin(p) {
+  // metadata 字段口径随 skill 版本变（0.7.x→0.8.0 把 stats 从"整个会话"改成
+  // "本切片"、字段名一个没动）。版本不一致就明说，别默默按旧理解渲染。
+  const el = arQ('arPlugin')
+  if (!p || !p.ok) { el.className = 'arhint'; el.textContent = ''; return }
+  if (!p.reviewed) {
+    el.className = 'arhint arwarn'
+    el.textContent = '产出插件 ' + p.version + '（看板复核过 ' + p.reviewedVersion + '，字段口径可能已变）'
+  } else {
+    el.className = 'arhint'
+    el.textContent = '插件 ' + p.version + ' · ' + p.sha
+  }
+}
+
+async function arLoadUsers() {
+  const res = await window.upload.listUsers()
+  arUsers = res.users || []
+  // 优先级：你确认过的 > 推测值。推测值取自 git email，SKILL.md 明说它不一定
+  // 等于域账号，所以只当初值 —— 你改过之后就以你的为准。
+  arCurUser = String(res.saved || '') || String(res.guess || '')
+  arQ('arUser').value = arCurUser
+}
+
+function arCloseList() { arQ('arUList').hidden = true }
+
+function arOpenList() {
+  const box = arQ('arUList')
+  const q = arQ('arUser').value.trim().toLowerCase()
+  const hits = arUsers.filter((u) => !q || u.toLowerCase().includes(q))
+  box.replaceChildren()
+  if (!arUsers.length) {
+    box.append(arEl('div', 'aruhead', 'NAS 读不到，没有可选账号 —— 直接输入域账号即可'))
+  } else {
+    box.append(arEl('div', 'aruhead', hits.length
+      ? ('盘上共 ' + arUsers.length + ' 个账号' + (q ? '，匹配 ' + hits.length + ' 个' : '，可打字过滤'))
+      : ('没有匹配，也可以直接用这个名字')))
+    for (const u of hits) {
+      const it = arEl('div', 'aruitem' + (u === arCurUser ? ' cur' : ''), u)
+      // mousedown 而不是 click：click 在 blur 之后才到，那时列表已关、选不中
+      it.addEventListener('mousedown', (e) => { e.preventDefault(); arCommitUser(u) })
+      box.append(it)
+    }
+  }
+  box.hidden = false
+  const cur = box.querySelector('.aruitem.cur')
+  if (cur) cur.scrollIntoView({ block: 'nearest' })
+}
+
+async function arCommitUser(v) {
+  const next = String(v || '').trim()
+  arCloseList()
+  arQ('arUser').value = next
+  if (next === arCurUser) return   // 没变就不必重读 NAS
+  arCurUser = next
+  await window.upload.setUser(next)
+  arLoadDates()
+}
+
+function arClear() {
+  arQ('arDetailHead').textContent = '选左边一个日子'
+  arQ('arDetail').replaceChildren()
+}
+
+// 未上报的日子点开显示这个。不去读 NAS —— arByDate 已经说明那天没有目录，
+// 再发一次网络读只是为了拿一个我们已经知道的空结果。
+function arNoUpload(date) {
+  arQ('arDetailHead').textContent = date
+  arQ('arDetail').replaceChildren(arEl('div', 'arempty', '这天没有上报记录。'))
+}
+
+function arMountGuide(res) {
+  const box = arQ('arMount')
+  box.hidden = false
+  box.replaceChildren()
+  box.append(arEl('p', null, 'NAS 还没挂载或访问不到，所以读不到归档。'))
+  box.append(arEl('p', null, '先点「打开共享」直接试一次 —— 域内机器用域账号登录时通常直接就通。'
+    + '被拒绝时再用「映射网络驱动器」，在向导里填域账号并勾上「记住我的凭据」。'))
+  const row = arEl('div', 'row2')
+  const b1 = arEl('button', null, '打开共享…')
+  b1.addEventListener('click', () => window.upload.openShare())
+  const b2 = arEl('button', null, '映射网络驱动器…')
+  b2.addEventListener('click', () => window.upload.mapDrive())
+  const b3 = arEl('button', null, '弄好了，刷新')
+  b3.addEventListener('click', arReloadAll)
+  row.append(b1, b2, b3)
+  box.append(row)
+  box.append(arEl('div', 'arsid', res.base || res.root || ''))
+  box.append(arEl('p', null, '密码只有你自己填 —— 看板不读取、不询问、不保存任何凭据。'))
+}
+
+async function arLoadDates() {
+  arQ('arCal').replaceChildren(arEl('div', 'arempty', '读取中…'))
+  arClear()
+  arQ('arMount').hidden = true
+  const res = await window.upload.listDates(arCurUser)
+  arShowPlugin(res.plugin)
+
+  if (!res.ok) {
+    if (res.reason === 'nas_unreachable') arMountGuide(res)
+    const why = {
+      nas_unreachable: '挂载好之后点上面的「刷新」。',
+      no_uploads_yet: '这个账号目录不存在，或者还没上报过。上面的「我的账号」换一个试试 —— 默认那个是从 git 邮箱猜的，不一定是你的域账号。',
+      no_user: '推不出上报目录名。',
+    }[res.reason] || ('读不到：' + res.reason)
+    const box = arEl('div', 'arempty')
+    box.append(arEl('div', null, why))
+    if (res.reason !== 'nas_unreachable') box.append(arEl('div', 'arsid', res.base || res.root || ''))
+    arQ('arCal').replaceChildren(box)
+    return
+  }
+
+  arByDate = new Map(res.dates.map((d) => [d.date, d]))
+  // 默认落在**最近一次上报**所在的月份，而不是当月 —— 隔几天没报时，
+  // 打开就看见空月份会让人以为数据没读到
+  const base = res.dates.length ? new Date(res.dates[0].date + 'T00:00:00') : new Date()
+  arYear = base.getFullYear()
+  arMonth = base.getMonth()
+  arSelected = ''
+  arRenderCal()
+}
+
+function arRenderCal() {
+  const wrap = arEl('div', 'arcal')
+  const bar = arEl('div', 'arcalbar')
+  const prev = arEl('button', null, '‹')
+  const next = arEl('button', null, '›')
+  prev.addEventListener('click', () => arShiftMonth(-1))
+  next.addEventListener('click', () => arShiftMonth(1))
+  bar.append(prev, arEl('span', 'm', arYear + ' 年 ' + (arMonth + 1) + ' 月'), next)
+  wrap.append(bar)
+
+  const grid = arEl('div', 'argrid')
+  for (const w of ['日', '一', '二', '三', '四', '五', '六']) grid.append(arEl('div', 'arwd', w))
+
+  // 用本地日期拼 key，与 upload-core 的 localDate 同口径
+  // （不能用 toISOString —— 那是 UTC，东八区会整体差一天）
+  const keyOf = (dt) => dt.getFullYear() + '-' + arPad(dt.getMonth() + 1) + '-' + arPad(dt.getDate())
+  const todayKey = keyOf(new Date())
+  // 补齐前后月份：首格从 1 号那周的周日开始，末尾补到整周
+  const lead = new Date(arYear, arMonth, 1).getDay()
+  const dim = new Date(arYear, arMonth + 1, 0).getDate()
+  const total = Math.ceil((lead + dim) / 7) * 7
+
+  for (let i = 0; i < total; i++) {
+    // 用"1 号 + 偏移"构造，让 Date 自己处理跨月跨年
+    const dt = new Date(arYear, arMonth, 1 - lead + i)
+    const k = keyOf(dt)
+    const inMonth = dt.getMonth() === arMonth && dt.getFullYear() === arYear
+    const hit = arByDate.get(k)
+    const cell = arEl('div', 'arcell'
+      + (hit ? ' has' : '') + (inMonth ? '' : ' out') + (k === todayKey ? ' today' : ''))
+    cell.append(arEl('div', 'ard', String(dt.getDate())))
+    if (hit) cell.append(arEl('div', 'arn', hit.sessions + ' 个'))
+    cell.title = hit
+      ? (k + '：已上报 ' + hit.sessions + ' 个会话 · ' + hit.projects + ' 个项目')
+      : (k + '：没有上报记录')
+    if (k === arSelected) cell.classList.add('on')
+    cell.addEventListener('click', () => {
+      // 点非本月的日子 -> 跳到那个月并选中它（不当"取消选中"处理，
+      // 这时意图明显是"我要去看那天"）
+      if (!inMonth) {
+        arYear = dt.getFullYear(); arMonth = dt.getMonth(); arSelected = k
+        arRenderCal()
+        if (hit) arLoadDetail(k); else arNoUpload(k)
+        return
+      }
+      for (const n of grid.querySelectorAll('.arcell')) n.classList.remove('on')
+      if (arSelected === k) { arSelected = ''; arClear(); return }   // 再点一次 = 取消
+      arSelected = k
+      cell.classList.add('on')
+      if (hit) arLoadDetail(k); else arNoUpload(k)
+    })
+    grid.append(cell)
+  }
+  wrap.append(grid)
+
+  // 本月小结：格子里只放"N 个"，总量放这里，免得靠一格格数
+  let mDays = 0
+  let mSessions = 0
+  for (const [k, v] of arByDate) {
+    if (k.slice(0, 7) !== arYear + '-' + arPad(arMonth + 1)) continue
+    mDays++; mSessions += v.sessions
+  }
+  wrap.append(arEl('div', 'arsum', mDays
+    ? ('本月已上报 ' + mDays + ' 天 · 共 ' + mSessions + ' 个会话')
+    : '本月没有上报记录'))
+  const lg = arEl('div', 'arlegend')
+  lg.append(arEl('span', 'arsw'), arEl('span', null, '已上报（数字 = 当天会话数）'))
+  lg.append(arEl('span', 'arsw sel'), arEl('span', null, '当前查看'))
+  wrap.append(lg)
+  arQ('arCal').replaceChildren(wrap)
+}
+
+function arShiftMonth(delta) {
+  const d = new Date(arYear, arMonth + delta, 1)
+  arYear = d.getFullYear(); arMonth = d.getMonth()
+  arRenderCal()
+}
+
+async function arLoadDetail(date) {
+  arQ('arDetailHead').textContent = date
+  arQ('arDetail').replaceChildren(arEl('div', 'arempty', '读取中…'))
+  const res = await window.upload.listSessions(date, arCurUser)
+  if (!res.ok || !res.sessions.length) {
+    arQ('arDetail').replaceChildren(arEl('div', 'arempty', res.ok ? '这一天没有明细' : '读不到明细'))
+    return
+  }
+  const frag = document.createDocumentFragment()
+  for (const s of res.sessions) {
+    const row = arEl('div', 'arrow')
+    const t1 = arEl('div', 'art1')
+    t1.append(arEl('span', 'arproj', s.project))
+    // 本片条数与全量分开说：metadata 的 stats 是**本切片**口径，
+    // 只显示它会让人以为"这个会话总共就这么多"
+    t1.append(arEl('span', 'arcnt', '本次 ' + s.msgCount + ' 条'
+      + (s.totalMsgCount ? ' · 全量 ' + s.totalMsgCount + ' 条' : '')))
+    if (s.isContinuation) t1.append(arEl('span', 'artag', '续接'))
+    if (s.feedbacks) t1.append(arEl('span', 'artag', s.feedbacks + ' 条反馈'))
+    row.append(t1)
+    // 目录日期是**上报日**不是内容日：切片可能覆盖前面好几天（skill 自动补空档）
+    if (s.coversFrom || s.coversTo) {
+      row.append(arEl('div', 'arcnt', '覆盖 ' + (arAt(s.coversFrom) || '?') + ' → ' + (arAt(s.coversTo) || '?')))
+    }
+    if (s.firstPrompt) row.append(arEl('div', 'arprompt', s.firstPrompt))
+    row.append(arEl('div', 'arsid', s.sessionId))
+    frag.append(row)
+  }
+  arQ('arDetail').replaceChildren(frag)
+}
+
+async function arReloadAll() { await arLoadUsers(); arLoadDates() }
+
+// 打字只过滤提示、**不读 NAS**；提交只在选中 / 回车 / 失焦
+arQ('arUser').addEventListener('focus', arOpenList)
+arQ('arUser').addEventListener('input', arOpenList)
+arQ('arUser').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); arCommitUser(arQ('arUser').value) }
+  else if (e.key === 'Escape') { arCloseList(); arQ('arUser').value = arCurUser }
+})
+arQ('arUser').addEventListener('blur', () => {
+  // 延一帧：让列表项的 mousedown 先跑完，否则点选会被 blur 抢先关掉
+  setTimeout(() => { arCloseList(); arCommitUser(arQ('arUser').value) }, 0)
+})
+document.addEventListener('mousedown', (e) => {
+  if (!e.target.closest('.arcombo')) arCloseList()
+})
+
+arQ('arReload').addEventListener('click', arReloadAll)
+function arCloseP() {
+  document.body.classList.remove('archive-on')
+  arSyncTabs(false)
+  arQ('arPanel').hidden = true
+}
+arQ('arClose').addEventListener('click', arCloseP)
+arQ('arToday').addEventListener('click', async () => {
+  const b = arQ('arToday')
+  b.disabled = true
+  const r = await window.upload.openClaude('帮我列出今天的会话')
+  b.disabled = false
+  arQ('arDetail').replaceChildren(arEl('div', 'arempty', r.ok
+    ? '已开一个 Claude 窗口并自动提交提示词。那是临时会话：不会被归档、也不能 --resume，要留存的活请另开窗口。'
+    : ('打不开 Claude 窗口：' + (r.reason || '未知'))))
+})
+
+// ---- 自绘设置面板 ----
+//
+// 原生菜单点一下就整个关闭（OS 行为，Electron 没有开关），要连改几项得反复点开；
+// 而且放不了输入框。面板一次解决这三件：不关、可连点、能放输入控件。
+// 全部 st 前缀 —— 这个文件已有 detail / clearDetail 等符号，撞名会静默出错。
+const stQ = (id) => document.getElementById(id)
+// 最近一帧的 settings。每帧都推，所以面板不用自己去问主进程要。
+let stCur = {}
+
+const ST_THEMES = [['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']]
+// 与主进程的 PURGE_PRESETS 一致；0 = 关闭。这里只是呈现，校验与夹取仍在
+// applySetting 里做（两个入口共用一处规则）。
+const ST_PURGE = [[0, '关闭'], [6, '6 小时'], [24, '1 天'], [72, '3 天'], [168, '7 天']]
+
+function stSeg(host, items, cur, onPick) {
+  host.replaceChildren()
+  for (const [val, label] of items) {
+    const b = document.createElement('button')
+    b.textContent = label
+    if (String(val) === String(cur)) b.className = 'on'
+    b.addEventListener('click', () => onPick(val))
+    host.append(b)
+  }
+}
+
+// 把 settings 回填到控件上。**跳过正在编辑的输入框** —— 每帧都回填的话，
+// 你打字打到一半就会被推送的旧值按回去（实测这类 bug 极难自查）。
+function stSync(s) {
+  stCur = s || {}
+  if (stQ('stPanel').hidden) return
+  const ck = (id, v) => { const e = stQ(id); if (e) e.checked = !!v }
+  ck('stTop', stCur.alwaysOnTop)
+  ck('stLaunch', stCur.autoLaunch)
+  ck('stSound', stCur.sound)
+  ck('stNotify', stCur.notify)
+  ck('stRemind', stCur.uploadRemind)
+  ck('stFolded', stCur.showFolded)
+  const t = stCur.uploadRemindTimes || []
+  stQ('stTimes').textContent = stCur.uploadRemind
+    ? (t.length ? ('当前 ' + t.join(' / ')) : '还没选时间，等于不会提醒')
+    : '提醒已关闭'
+  if (document.activeElement !== stQ('stNasUser')) {
+    stQ('stNasUser').value = String(stCur.nasUser || '')
+  }
+  stSeg(stQ('stTheme'), ST_THEMES, stCur.theme || 'auto',
+    (v) => window.board.setSetting('theme', v))
+  const ph = Number(stCur.autoPurgeHours) || 0
+  // 自定义值不在档位里时不选中任何档 —— 硬选一个会谎报当前规则
+  stSeg(stQ('stPurge'), ST_PURGE, ST_PURGE.some(([h]) => h === ph) ? ph : '',
+    (v) => window.board.setSetting('autoPurgeHours', v))
+  if (document.activeElement !== stQ('stPurgeNum')) stQ('stPurgeNum').value = ph || ''
+}
+
+function stOpen() {
+  // 整页展开：让出列表/详情/归档（由 body.settings-on 的 CSS 负责），
+  // 归档面板自己的 hidden 属性不动 —— 关掉设置就自动回到你原来那个视图。
+  document.body.classList.add('settings-on')
+  stQ('stPanel').hidden = false
+  stSync(stCur)
+}
+function stClose() {
+  document.body.classList.remove('settings-on')
+  stQ('stPanel').hidden = true
+}
+
+stQ('stClose').addEventListener('click', stClose)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !stQ('stPanel').hidden) { stClose(); e.stopPropagation() }
+}, true)
+
+// 开关类：改完**不关面板** —— 这正是自绘的理由
+for (const [id, key] of [['stTop', 'alwaysOnTop'], ['stLaunch', 'autoLaunch'],
+  ['stSound', 'sound'], ['stNotify', 'notify'],
+  ['stRemind', 'uploadRemind'], ['stFolded', 'showFolded']]) {
+  stQ(id).addEventListener('change', () => window.board.setSetting(key, stQ(id).checked))
+}
+
+stQ('stCollapse').addEventListener('click', () => window.board.clearStale())
+stQ('stHud').addEventListener('click', () => window.board.openHudGuide())
+stQ('stTimesBtn').addEventListener('click', () => window.board.askRemindTimes && window.board.askRemindTimes())
+stQ('stPurgeSet').addEventListener('click', () => {
+  const n = Math.round(Number(stQ('stPurgeNum').value) || 0)
+  // 只送原始值，夹取与校验交给 applySetting —— 页面再抄一份规则必然漂移
+  if (n > 0) window.board.setSetting('autoPurgeHours', n)
+})
+// 域账号：change（失焦/回车）才提交，不在打字过程中每个字母都写盘
+stQ('stNasUser').addEventListener('change', async () => {
+  const v = stQ('stNasUser').value.trim()
+  stQ('stNasUser').value = v
+  await window.upload.setUser(v)
+  // 归档面板下次打开会用新账号；已经开着就立刻重读
+  if (!arQ('arPanel').hidden) { arCurUser = v; arLoadDates() }
+})
+
+let arLoaded = false
+function arSyncTabs(on) {
+  arQ('tabArchive').classList.toggle('on', on)
+  arQ('tabBoard').classList.toggle('on', !on)
+}
+
+function arOpen() {
+  document.body.classList.add('archive-on')
+  arSyncTabs(true)
+  arQ('arPanel').hidden = false
+  // NAS 是网络读，只在第一次打开时拉一次；之后要新数据点「刷新」。
+  if (!arLoaded) { arLoaded = true; arReloadAll() }
+}
+// 上报提醒的通知点开 -> 主进程叫页面把面板打开（面板在主窗口里，不另开窗口）
+if (window.board.onOpenArchive) window.board.onOpenArchive(arOpen)
+
+// tab 切换。点已选中的那个不做任何事 —— tab 的语义是切到某个视图，
+// 不是开关某个面板，所以不该有再点一次收起这种行为。
+arQ('tabBoard').addEventListener('click', () => {
+  stClose()   // 设置整页盖着时，点 tab 必须先退出它，否则看着像没反应
+  if (!arQ('arPanel').hidden) arCloseP()
+})
+arQ('tabArchive').addEventListener('click', () => {
+  stClose()
+  if (arQ('arPanel').hidden) arOpen()
+})
 
 // ---- 自动删除阈值：自定义时长对话框 ----
 //
@@ -1126,6 +1949,120 @@ document.getElementById('purgeOff').addEventListener('click', () => {
 // 点遮罩空白处关掉，与帮助面板一致
 purgeMask.addEventListener('mousedown', (e) => { if (e.target === purgeMask) closePurge() })
 window.board && window.board.onAskPurgeThreshold(openPurge)
+
+// ---- 上报提醒：时间选择对话框 ----
+//
+// 设置菜单点「上报提醒…」由主进程发消息过来。整点走九宫格（一眼扫完），
+// 非整点走那个输入框 —— 两者最后拼成一个串交给主进程。
+//
+// **这里不判时间格式**：格式的权威只有 upload-core.parseTimes 一处，页面把原始
+// 输入整个送过去，看不懂的条目由它回报（{ok:false, dropped}），这里只负责显示。
+// 两边各写一套正则的话，迟早出现"对话框收下了、落盘时被悄悄丢掉"。
+const remindMask = document.getElementById('remindMask')
+const remindOn = document.getElementById('remindOn')
+const remindGrid = document.getElementById('remindGrid')
+const remindExtra = document.getElementById('remindExtra')
+const remindCur = document.getElementById('remindCur')
+const remindErr = document.getElementById('remindErr')
+const remindBody = document.getElementById('remindBody')
+// 整点选中集合（'00'..'23'）。非整点不进这里，它们只活在输入框里
+const remindHours = new Set()
+let remindDefaults = []
+let remindNasUser = ''
+
+// 九宫格建一次就够，之后只切 .on
+for (let h = 0; h < 24; h++) {
+  const hh = String(h).padStart(2, '0')
+  const b = el('button', null, hh)
+  b.type = 'button'
+  b.dataset.h = hh
+  b.addEventListener('click', () => {
+    if (remindHours.has(hh)) remindHours.delete(hh); else remindHours.add(hh)
+    b.classList.toggle('on', remindHours.has(hh))
+    remindErr.textContent = ''
+    echoRemind()
+  })
+  remindGrid.append(b)
+}
+
+// 把待保存的结果回显出来。**必须有**：整点在格子里、非整点在输入框里，
+// 两处分开看不出"最终会在哪几个点被叫"，而那正是你要确认的东西。
+function echoRemind() {
+  const picked = [...remindHours].sort().map((h) => h + ':00')
+  const extra = remindExtra.value.trim()
+  remindCur.textContent = ''
+  const label = picked.concat(extra ? [extra] : []).join(' ')
+  if (!label) {
+    remindCur.appendChild(document.createTextNode('没选时间 —— '))
+    remindCur.appendChild(el('b', null, '不会提醒'))
+  } else {
+    remindCur.appendChild(document.createTextNode('提醒时间：'))
+    remindCur.appendChild(el('b', null, label))
+  }
+  // 域账号没设过时，"报过就不提醒"这一半是失效的（核对不了），得说出来。
+  // 不说的话表现是"我明明报了它还叫"，根因在另一个窗口里，基本查不到。
+  if (!remindNasUser) {
+    remindCur.appendChild(el('div', 'lead',
+      '还没设域账号，核对不了"今天报没报" —— 每次都会提醒。'
+      + '去「↥ 上报日历」窗口左上角确认一次账号即可。'))
+  }
+  remindBody.classList.toggle('dim', !remindOn.checked)
+}
+
+function openRemind(payload) {
+  const p = payload || {}
+  remindDefaults = Array.isArray(p.defaults) ? p.defaults : []
+  remindNasUser = String(p.nasUser || '')
+  fillRemind(!!p.on, Array.isArray(p.times) ? p.times : [])
+  remindErr.textContent = ''
+  remindMask.classList.add('on')
+}
+
+// 把一组时间铺进界面：整点落格子，非整点落输入框。
+// 分流判据是"分钟位是不是 00"，不是"在不在默认档里" —— 后者会把你自己选的
+// 22:00 挤到输入框里去。
+function fillRemind(on, times) {
+  remindOn.checked = !!on
+  remindHours.clear()
+  const extra = []
+  for (const t of times) {
+    const m = /^(\d{2}):(\d{2})$/.exec(String(t))
+    if (m && m[2] === '00') remindHours.add(m[1])
+    else extra.push(t)
+  }
+  for (const b of remindGrid.children) b.classList.toggle('on', remindHours.has(b.dataset.h))
+  remindExtra.value = extra.join(', ')
+  echoRemind()
+}
+
+function closeRemind() { remindMask.classList.remove('on') }
+
+async function commitRemind() {
+  // 拼成一个串交给主进程去解析：分隔符规则也归 parseTimes 管，
+  // 页面连"逗号怎么切"都不该自己决定
+  const raw = [...remindHours].sort().map((h) => h + ':00').join(',') + ',' + remindExtra.value
+  const res = await window.board.setRemind(remindOn.checked, raw)
+  if (!res || res.ok !== true) {
+    remindErr.textContent = '这几个填法看不懂：' + ((res && res.dropped) || []).join('、')
+      + '（要 HH:MM，如 21:30）'
+    return
+  }
+  closeRemind()
+}
+
+remindOn.addEventListener('change', echoRemind)
+remindExtra.addEventListener('input', () => { remindErr.textContent = ''; echoRemind() })
+remindExtra.addEventListener('keydown', (e) => { if (e.key === 'Enter') commitRemind() })
+document.getElementById('remindOk').addEventListener('click', commitRemind)
+document.getElementById('remindCancel').addEventListener('click', closeRemind)
+document.getElementById('remindX').addEventListener('click', closeRemind)
+// 只把表单恢复成默认，不直接落盘 —— 点了还能反悔，与「取消」是一对
+document.getElementById('remindReset').addEventListener('click', () => {
+  fillRemind(true, remindDefaults)
+  remindErr.textContent = ''
+})
+remindMask.addEventListener('mousedown', (e) => { if (e.target === remindMask) closeRemind() })
+window.board && window.board.onAskRemindTimes(openRemind)
 // ---- 帮助面板 ----
 
 const mask = document.getElementById('mask')
@@ -1435,6 +2372,8 @@ let settingsApplied = false
 const offhint = document.getElementById('offhint')
 
 window.board.onRows(({ rows, stats, settings }) => {
+  // 面板开着时用最新值回填（跳过正在编辑的输入框，见 stSync）
+  stSync(settings)
   // 首帧才应用持久化的排序与列宽：之后这两个由用户交互驱动，
   // 每帧都套一遍会把正在拖的列宽按回旧值。
   if (!settingsApplied) {
@@ -1458,7 +2397,6 @@ window.board.onRows(({ rows, stats, settings }) => {
   const offs = []
   if (!settings.notify) offs.push('通知已关')
   if (!settings.sound) offs.push('响铃已关')
-  if (settings.showFolded) offs.push('含已隐藏')
   const oh = offs.join(' · ')
   if (offhint.textContent !== oh) offhint.textContent = oh
 
@@ -1481,7 +2419,15 @@ window.board.onRows(({ rows, stats, settings }) => {
   s += stats.needYou > 0
     ? '<b class="hot">' + stats.needYou + '</b>'
     : '<b>0</b>'
-  if (stats.folded > 0) s += ' · 已折叠 ' + stats.folded
+  // 折叠指标：同一个数字（可折叠的行数），措辞跟着开关走 ——
+  // 开着时说"含"（它们在列表里），关着时说"已折叠"（它们被收起来了）。
+  // 数量为 0 时整块不显示：没有可折叠的行，这句话没有信息量。
+  const fh = document.getElementById('foldhint')
+  const fhText = stats.folded > 0
+    ? ((settings.showFolded ? '含已隐藏 ' : '已折叠 ') + stats.folded)
+    : ''
+  if (fh.textContent !== fhText) fh.textContent = fhText
+
   const statEl = document.getElementById('stat')
   if (statEl.innerHTML !== s) statEl.innerHTML = s
 

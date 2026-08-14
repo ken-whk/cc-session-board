@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict'
 
-// Claude 会话看板 —— 数据层（跨平台，Windows / macOS 共用）
+// Claude Code 会话看板 —— 数据层（跨平台，Windows / macOS 共用）
 //
 // 这里只做"算出该显示什么"，不碰任何界面。
 // 早期还有一份 PowerShell 平行实现，2026-08-10 已删除 —— 现在这是唯一数据层。
@@ -29,6 +29,29 @@ const ASK_TAIL_BYTES = 64 * 1024
 // 「等你输入 / 已完成」超过这个时长没被处理 -> 降级为「久候」，单独一档沉底。
 // Why：不分档的话隔夜挂着的会话永远霸榜，把刚跑完的挤到最下面。
 const IDLE_LONG_MS = 2 * 60 * 60 * 1000
+
+// 本进程运行期间**曾在注册表里出现过**的 session id。
+//
+// 用来区分两件完全不同的事：
+//   · 曾出现、现在没了  -> 会话真的结束了（有 pid 判过），报「✕ 已关闭」
+//   · 从未出现          -> 死活**未知**，不该断言关闭
+//
+// Why 需要区分：不是每个会话都会注册。实测用位置参数带初始提示启动的会话
+// （`claude "..."`，看板「上报当日」按钮走这条）压根不写 sessions/<pid>.json，
+// 连 hook payload 的 transcript_path 都是空的、transcript 文件也找不到 ——
+// 既没有 pid 可判、也没有心跳可测。而看板对「已关闭」的定义是"按 pid 精确判定"，
+// 对这种会话它根本没判过，直接报已关闭是在断言一件没有证据的事，
+// 而且「已关闭」默认隐藏 —— 一个正在跑的会话会就此从列表里消失（实测踩过）。
+//
+// 代价（知情接受）：这种会话真结束时也不会显示「已关闭」，会停在它最后一次
+// hook 说的状态（通常是「✔ 已完成」），超 2 小时降级为「· 久候」沉底、
+// 到自动删除阈值被回收。宁可留一行看得见的过期记录，也不谎报一个"已关闭"
+// 把还活着的会话藏掉 —— 两种错里这个方向的代价小得多。
+//
+// 只放内存：看板重启后这份记忆清空，于是重启前就已结束的未注册会话会从
+// 「已关闭」变成「已完成」。不落盘是因为那要新增一个状态文件，而这点偏差
+// 只影响一行的字样，不值得。
+const everRegistered = new Set()
 
 // Claude Code 的配置根目录。**必须认 CLAUDE_CONFIG_DIR** ——
 // 用户把 .claude 挪走时，claude-hud 等周边工具都读这个变量；
@@ -835,6 +858,10 @@ function buildRows(opts) {
   const regUsable = reg.size > 0
   let hiddenDirty = false
 
+  // 记下这一帧见到的所有注册 id。只在注册表可用时记 —— 整体读不到那一帧
+  // 什么都没见到，不能因此把已知的记忆当成"从未注册过"。
+  if (regUsable) for (const k of reg.keys()) everRegistered.add(k)
+
   // 兜底路径要用的窗口大小，每帧读一次就够 —— 不要放进按行的循环里重复读文件
   const ctxWindowDefault = defaultContextWindow()
 
@@ -870,6 +897,9 @@ function buildRows(opts) {
     // 用 updated_ms（最后一次 hook 事件）而不是文件 mtime 算年龄：判"这个会话多久没动静"
     // 是业务问题，mtime 会被拷贝 / 备份 / 同步工具改写。读不到 updated_ms 就不删 ——
     // 宁可留一条脏记录让你手动删，也不拿判不准的年龄去做不可撤销的事。
+    // 从未在注册表里出现过 -> 死活未知，不能断言「已关闭」（详见 everRegistered）
+    const neverRegistered = !reg.has(id) && !everRegistered.has(id)
+
     if (autoPurgeMs > 0 && st && isOrphan(reg, regUsable, id)) {
       const lastAct = Number(st.updated_ms) || 0
       if (lastAct > 0 && now - lastAct > autoPurgeMs) { purgeRecord(id); continue }
@@ -892,6 +922,10 @@ function buildRows(opts) {
 
     let eff
     if (!regUsable) {
+      eff = legacyStatus(st, hasBeat, silent, tp)
+    } else if (!alive && neverRegistered) {
+      // 从未注册过：没 pid 可判、没心跳可测，按它自己的 hook 记录说状态，
+      // 不断言已关闭（那会把还活着的会话默认隐藏掉）
       eff = legacyStatus(st, hasBeat, silent, tp)
     } else if (!alive) {
       eff = 'closed'
@@ -1162,6 +1196,11 @@ function buildRows(opts) {
 // `regUsable` 是必须死守的护栏：注册表整体读不到时（目录空 / 权限 / Claude Code
 // 换实现）每一行的 rg 都是 undefined，这个判据会全线假阳性 —— 不守这一条，
 // 一次读取失败就足以把整个 state/ 清空。判据只此一处，界面层不许自己算。
+// 残留记录判据：注册表里已经没有这个 id。
+//
+// 注意这里**不**排除从未注册过的会话 —— 那种会话的 state 若不可删、
+// 自动回收也会一并被挡，它的记录就永远清不掉了。删一个还活着的未注册会话
+// 只会让它在下次 hook 时原地重建（自愈），代价远小于永久堆积。
 function isOrphan(reg, regUsable, id) {
   return regUsable && !reg.has(String(id))
 }
@@ -1245,6 +1284,9 @@ module.exports = {
   // 靠等真任务出现来验证既慢又抓不准时机。
   countActiveSubwork,
   buildRows, getLastExchange, getHealthIssues, getMissingHooks, statusLegend,
+  // 上报面板要把 transcript 里的 cwd 翻成项目名，用的必须是同一套推导 ——
+  // 各写一份的话，同一个会话在两个界面上会显示成两个不同的项目名。
+  labelFromCwd,
   removeRecord, unhideRecord, purgeRecord, clearStaleRecords, formatDuration,
   // 用量快照的读取与路径由数据层单一定义，界面层/引导层都从这里取 ——
   // 各自硬编码一份路径的话，改一处就会静默错位（引导写 A、看板读 B）。

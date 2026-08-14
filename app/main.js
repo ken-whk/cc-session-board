@@ -1,6 +1,6 @@
 'use strict'
 
-// Claude 会话看板 —— Electron 主进程（Windows / macOS 共用）
+// Claude Code 会话看板 —— Electron 主进程（Windows / macOS 共用）
 //
 // 职责：开窗口、定时向渲染层推数据、托盘图标、系统通知、设置持久化。
 // 所有判定逻辑都在 board-core.js 里，本文件不做业务判断。
@@ -8,9 +8,10 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, nativeImage, clipboard, nativeTheme, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
-const { execFile } = require('child_process')
+const { execFile, spawn } = require('child_process')
 
 const core = require('../board-core.js')
+const uploadCore = require('../upload-core.js')
 const firstRun = require('./first-run.js')
 const hudGuide = require('./hud-guide.js')
 
@@ -63,6 +64,20 @@ let settings = {
   // 存小时是为了让用户能填任意时长（界面上按小时/天输入，落盘统一成小时）。
   // 不放心自动删数据就在设置里调到「关闭」，右键「删除记录」照样可用。
   autoPurgeHours: 72,
+  // NAS 归档面板看谁的目录（域账号）。空 = 用推测值。
+  //
+  // 必须能记住：共享盘上是全公司每个人一个目录，不记的话每次打开都要在一长串
+  // 别人的名字里找自己。而且默认推测值取自 git email，SKILL.md 明说它不一定
+  // 等于域账号 —— 所以这个值只能由人确认一次，不能靠猜。
+  nasUser: '',
+  // 到点提醒"今天该上报会话了"。默认开着 —— 它要解决的就是"忘了报"，
+  // 而默认关闭的提醒功能救不了任何一个会忘的人。
+  uploadRemind: true,
+  uploadRemindTimes: uploadCore.DEFAULT_REMIND_TIMES.slice(),
+  // 今天已经提醒过哪几个点。落盘而不是只放内存：不落的话，晚上重启一次看板
+  // 就会把当天过掉的点重新提醒一遍。跨天由 dueReminders 按 firedDate 自动作废。
+  uploadRemindFiredDate: '',
+  uploadRemindFired: [],
 }
 
 function loadSettings() {
@@ -107,7 +122,7 @@ function createWindow() {
   const opts = {
     width: settings.w, height: settings.h,
     minWidth: 760, minHeight: 380,
-    title: 'Claude 会话看板',
+    title: 'Claude Code 会话看板',
     icon: ICON,
     alwaysOnTop: !!settings.alwaysOnTop,
     autoHideMenuBar: true,
@@ -145,7 +160,7 @@ function createTray() {
   // macOS 托盘图标要小一号，否则会被拉伸得很糊
   if (process.platform === 'darwin') img = img.resize({ width: 16, height: 16 })
   tray = new Tray(img)
-  tray.setToolTip('Claude 会话看板')
+  tray.setToolTip('Claude Code 会话看板')
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '显示看板', click: showWindow },
     { type: 'separator' },
@@ -195,8 +210,9 @@ function notifyViaOsascript(title, body, silent) {
  * @param {string} body 正文
  * @param {boolean} silent true = 不响铃
  * @param {string} sessionId 点通知时要跳到哪个会话（可空）
+ * @param {Function} onClick 给非会话类通知（如上报提醒）用；给了就取代"跳到那一行"
  */
-function showNotification(title, body, silent, sessionId) {
+function showNotification(title, body, silent, sessionId, onClick) {
   const isMac = process.platform === 'darwin'
 
   if (!Notification.isSupported()) {
@@ -217,6 +233,9 @@ function showNotification(title, body, silent, sessionId) {
   // 注意 macOS 未签名走 osascript 兜底时没有这个回调（osascript 弹的通知
   // 归属于脚本宿主，点它只会打开脚本编辑器），这是那条兜底路径的固有代价。
   n.on('click', () => {
+    // 上报提醒点开该去上报日历，不是主列表 —— 通知说的是"去报"，
+    // 落到一个跟它无关的界面等于让人自己再找一次入口。
+    if (onClick) { onClick(); return }
     showWindow()
     if (sessionId && win && !win.isDestroyed()) {
       win.webContents.send('board:focusRow', sessionId)
@@ -283,7 +302,7 @@ function tick() {
   const folded = res.idleCount + res.closedCount + res.hiddenCount
   lastFolded = folded
   if (tray) {
-    tray.setToolTip('Claude 会话看板：' + res.liveCount + ' 活 / ' + res.needYou + ' 待处理')
+    tray.setToolTip('Claude Code 会话看板：' + res.liveCount + ' 活 / ' + res.needYou + ' 待处理')
   }
   if (win && !win.isDestroyed()) {
     win.webContents.send('board:rows', {
@@ -659,6 +678,284 @@ ipcMain.handle('board:setSetting', (_e, key, value) => {
 // 常驻顶栏占掉一整行（约 40px），而那一行本该给列表。
 // Why 用原生 checkbox 项而不是自绘：菜单一打开就能看见勾选状态，
 // 所以收起来并不丢"当前开没开"这个信息 —— 只是从常驻改成按需。
+// ---- 会话上报归档面板 ----
+//
+// **嵌在主窗口里，不再另开 BrowserWindow。** 独立窗口会在任务栏多占一个条目，
+// 而这是个偶尔看一眼的面板，不值得一个窗口；顺带也解决了配色不一致
+// （那个独立页面只跟 prefers-color-scheme，而主窗口支持手动锁定深浅色）。
+//
+// 但"NAS 不进刷新循环"这条约束照旧：面板里的所有 NAS 读都由页面按需触发
+// （第一次打开 + 你点刷新），绝不跟着 1.5 秒的 tick 走 —— 那等于后台轮询共享盘，
+// 会破掉看板"无后台网络出口"这条性质。
+function openUploadPanel() {
+  showWindow()
+  if (win && !win.isDestroyed()) win.webContents.send('board:openArchive')
+}
+
+// 三个 handler 全是**只读**。看板不执行上报 —— 上报走 cc-session-nas-upload
+// skill 本身，它的 list 带 uploadState / 待报条数 / 已归档到哪一刻，那是"选哪些
+// 会话"真正需要的信息，而看板本地拿不到（必须比对 NAS）。看板只补 skill 没有的
+// 那一半：它没有 history 子命令，答不了"我哪天报过哪些"。
+//
+// 账号（域账号）由页面传：默认值是从 git email 猜的，SKILL.md 自己就说过它
+// 不一定等于域账号，所以页面给下拉让人选盘上真实存在的目录。
+// saved 是**你确认过**的账号，优先级高于枚举和推测：盘上有几十个人的目录，
+// 每次让你在里头找自己是没必要的。枚举结果仍然回给页面，但只当输入提示用。
+ipcMain.handle('upload:listUsers', () => Object.assign(
+  uploadCore.listExportUsers(),
+  { saved: String(settings.nasUser || '') },
+))
+
+// 单独一条而不是走 applySetting：那条会顺带 tick() 踢主看板刷新，
+// 而这只是上报窗口的一个偏好，跟主列表无关。
+ipcMain.handle('upload:setUser', (e, user) => {
+  settings.nasUser = String(user || '').trim()
+  saveSettings()
+  return settings.nasUser
+})
+ipcMain.handle('upload:listDates', (e, user) => Object.assign(
+  uploadCore.listUploadedDates(user ? { user: String(user) } : undefined),
+  { plugin: uploadCore.resolvePlugin() },
+))
+ipcMain.handle('upload:listSessions', (e, date, user) => uploadCore.listUploadedSessions(
+  String(date || ''), user ? { user: String(user) } : undefined,
+))
+
+// 「打开共享」——**不是**代你挂载。
+//
+// 挂载走系统级 SMB 认证：域账号+密码只能由你本人在系统弹出的认证框里输入。
+// 看板（和 skill 的脚本一样）从不读取、不询问、不缓存任何密码 —— 凭据绝不落地明文。
+// 这个按钮做的事就是把你送到那个认证框前：用资源管理器打开 UNC 路径，
+// 没认证过的话 Windows 自己会弹框。域内机器且用域账号登录时往往直接就通了
+// （Kerberos/NTLM 单点登录），压根不用手动映射。
+ipcMain.handle('upload:openShare', async () => {
+  const root = uploadCore.nasRoot()
+  // shell.openPath 返回错误字符串（空串 = 成功），不抛异常
+  const err = await shell.openPath(root)
+  return { ok: !err, path: root, error: err || '' }
+})
+
+// 开一个**交互式** Claude 会话窗口并把提示词填进去。
+//
+// `claude [prompt]`（不带 -p）就是交互式 + 初始提示，正合用 —— 你在那个窗口里
+// 可以接着对话，而不是拿一段一次性输出。
+//
+// 为什么用 mintty 而不是 cmd：提示词是中文。走 `cmd.exe /c start ...` 时命令行要过
+// 控制台代码页，中文会乱码（与 CLAUDE.md 铁律 3 同一个根因）。这里用 Node 的
+// spawn 直接拉 mintty，args 经 CreateProcess 以 UTF-16 传递、全程不经 cmd 解析，
+// 而 mintty/bash 本身是 UTF-8 的。cmd 只作最后兜底，且会在日志里说明可能乱码。
+//
+// --plugin-dir：那个插件是 project 作用域装的，不显式加载的话，在别的目录起的
+// 会话看不见 cc-session-nas-upload。显式给上就不依赖你在哪个目录起。
+ipcMain.handle('upload:openClaude', (e, prompt) => {
+  const text = String(prompt || '').trim()
+  if (!text) return { ok: false, reason: 'empty_prompt' }
+  const p = uploadCore.resolvePlugin()
+  const home = require('os').homedir()
+
+  // bash 单引号内只有单引号需要转义，其余（含中文、空格）原样安全
+  const q = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'"
+  // 提示词作为位置参数直接带上：一步到位，不用人再粘一次。
+  //
+  // **这条路的代价是知情选择的**，实测清楚：`claude "初始提示"` 起出来的会话
+  // 既不写 sessions/<pid>.json、也不落 transcript。于是
+  //   · 拿不到上下文百分比、心跳、真实标题（标题退回你敲的那句）
+  //   · **该会话自己不会被归档**（skill 上报的就是 transcript 切片）
+  //   · **不能 --resume**，窗口关掉就找不回来
+  // 前两条对"临时开个窗口让它去上报"无所谓；最后一条要留意 ——
+  // 别在这个窗口里做需要留存的活。
+  //
+  // 排除过程（都有实测，别重复走）：不是 winpty（正常注册的会话父链同样是
+  // winpty）；不是非交互 shell（换成 `bash --rcfile ... -i` 后仍然不落盘，
+  // SHLVL 一直是 3 —— 那是 npm 的 claude shell 外壳套出来的层数，与这一层无关）。
+  // 剩下唯一站得住的嫌疑就是位置参数本身。
+  //
+  // **不碰剪贴板**：提示词已经自动提交了，再写一份是多余的；而静默覆盖用户
+  // 剪贴板里的东西是实打实的打扰 —— 他可能正拿着别的内容准备粘。
+  const parts = ['claude']
+  if (p.ok && p.installPath) parts.push('--plugin-dir', q(p.installPath))
+  parts.push(q(text))
+
+  // 走 --rcfile + -i（**交互式** shell），不用 `bash -l -c`。
+  //
+  // Why：`-c` 是非交互 shell。实测这么起出来的会话 Claude Code **不落盘** ——
+  // 既不写 sessions/<pid>.json、也不写 transcript，于是看板拿不到判活信源、
+  // 算不出上下文百分比、也读不到标题（hook 那侧全正常，你敲的话都记下了）。
+  // 两个会话的 env 指纹几乎一致，唯一差别是 SHLVL（1 vs 3），指向"是否交互式"
+  // 这条判据。改成交互式 shell 是目前唯一有证据支撑的方向。
+  //
+  // rcfile 里带中文提示词，所以必须用 fs 以 utf8 写（禁止 shell 重定向 —— 那会
+  // 走控制台代码页把中文写坏，与 CLAUDE.md 铁律 3 同一个根因）。
+  const rc = path.join(app.getPath('temp'), 'cc-board-launch.sh')
+  const script = [
+    '# 看板「上报当日」生成，每次覆盖',
+    'source ~/.bash_profile 2>/dev/null || source ~/.profile 2>/dev/null',
+    'cd ' + q(home),
+    // 这个窗口的会话不落盘（见上），提前说清楚，免得有人在这儿干正事
+    'echo "[看板] 临时会话：不会被归档、也不能 --resume。要留存的活请另开窗口。"',
+    'echo',
+    parts.join(' '),
+    'echo; echo "[会话已结束，窗口保留]"',
+  ].join('\n') + '\n'
+  try { fs.writeFileSync(rc, script, 'utf8') } catch (err) {
+    return { ok: false, reason: 'rcfile_write_failed: ' + String((err && err.message) || err) }
+  }
+  // MSYS 路径：mintty 里的 bash 认 /c/... 而不是 C:\...
+  const rcMsys = '/' + rc.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (m, d) => d.toLowerCase())
+
+  const MINTTY = 'C:\\Program Files\\Git\\usr\\bin\\mintty.exe'
+  try {
+    if (fs.existsSync(MINTTY)) {
+      const child = spawn(MINTTY, ['-w', 'max', '/usr/bin/bash', '--rcfile', rcMsys, '-i'], {
+        // cwd 必须显式给 —— 子进程默认继承 Electron 的工作目录，而看板是被
+        // 快捷方式/脚本拉起来的，那个目录可能是任何地方（实测见过
+        // `C:\Program Files\Git`）。会话的 cwd 决定看板列表里那一行的项目名，
+        // 不给就会出现"项目显示成 Git"这种看不懂的数据。
+        cwd: home,
+        detached: true, stdio: 'ignore', windowsHide: false,
+      })
+      child.unref()
+      return { ok: true, via: 'mintty' }
+    }
+    // 兜底：cmd。中文提示词在这条路上**可能乱码**，如实回给界面。
+    const child = spawn('cmd.exe', ['/c', 'start', '', 'cmd', '/k', 'claude', text], {
+      detached: true, stdio: 'ignore', windowsHide: false,
+    })
+    child.unref()
+    return { ok: true, via: 'cmd', warn: 'cmd 路径下中文提示词可能乱码' }
+  } catch (err) {
+    return { ok: false, reason: String((err && err.message) || err) }
+  }
+})
+
+// 直连被拒时的退路：拉起系统「映射网络驱动器」向导。
+// 同样只是打开向导，账号密码仍由你在向导里填，并且要**勾上「记住我的凭据」**——
+// 不勾的话下次重连还得再输一遍。
+ipcMain.handle('upload:mapDrive', () => {
+  try {
+    execFile('rundll32.exe', ['shell32.dll,SHHelpShortcuts_RunDLL', 'Connect'], { windowsHide: false }, () => { })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e) }
+  }
+})
+
+// ---- 上报提醒 ----
+//
+// 到点提醒"今天该上报会话了"，当天已经报过就不提醒。判定全在 upload-core：
+// dueReminders（现在到点了没，纯函数）+ hasUploadedOn（今天报了没，读 NAS）。
+//
+// 每 30 秒看一眼钟，但**只有到点那一次才真去读 NAS** —— 一天最多四次网络读。
+// 绝不能挂到 1.5 秒的 tick 上：那等于后台轮询共享盘，会破掉看板"无后台网络
+// 出口"这条性质（与上报窗口同一条纪律）。
+const REMIND_CHECK_MS = 30000
+
+let remindTimer = null
+// 上一次 NAS 读还没回来就不叠第二次：SMB 挂住时能拖十几秒，30 秒的周期会往上摞
+let remindBusy = false
+// 当天已核实"报过了"。核实到之后当天不再读 NAS，也不再提醒 —— 事已经做完了
+let remindDoneDate = ''
+
+// 当前提醒规则的一句话描述。菜单标签和对话框共用，免得两处各写一套措辞
+function describeRemind() {
+  if (!settings.uploadRemind) return '关闭'
+  const t = settings.uploadRemindTimes || []
+  return t.length ? t.join(' ') : '没选时间'
+}
+
+// 记账：这几个点今天处理过了。**不管结果是"提醒了"还是"查到已报"都要记** ——
+// 尤其是读 NAS 失败那次，不记的话下一个 30 秒周期立刻重来，直到读通为止，
+// 断网的晚上会变成每半分钟一条通知。
+function markRemindFired(date, due) {
+  const keep = (settings.uploadRemindFiredDate === date && Array.isArray(settings.uploadRemindFired))
+    ? settings.uploadRemindFired : []
+  settings.uploadRemindFiredDate = date
+  settings.uploadRemindFired = keep.concat(due.filter((t) => !keep.includes(t)))
+  saveSettings()
+}
+
+async function checkUploadReminder() {
+  if (!settings.uploadRemind || remindBusy) return
+  const { date, due } = uploadCore.dueReminders({
+    now: new Date(),
+    times: settings.uploadRemindTimes,
+    firedDate: settings.uploadRemindFiredDate,
+    fired: settings.uploadRemindFired,
+  })
+  if (!due.length) return
+  // 今天已核实报过：后面的点直接记掉，不必再为它们各读一次 NAS
+  if (remindDoneDate === date) { markRemindFired(date, due); return }
+
+  remindBusy = true
+  let r
+  try {
+    r = await uploadCore.hasUploadedOn(date,
+      settings.nasUser ? { user: settings.nasUser } : undefined)
+  } catch (err) {
+    r = { ok: false, reason: 'error' }
+  }
+  remindBusy = false
+  markRemindFired(date, due)
+
+  if (r.ok && r.uploaded) { remindDoneDate = date; return }
+
+  // 核对不上时**照常提醒**，但正文里说清没核对上。
+  //
+  // Why 不静默跳过：域账号填错、NAS 抽风、在家没挂 VPN 都会走到这里，静默的话
+  // 提醒功能整个失效而你不会知道 —— 一个看起来开着、实际不响的开关比没有更糟。
+  // 代价是断网的晚上会按你设的点数被敲几次，那是明说过的取舍。
+  const why = {
+    nas_unreachable: 'NAS 读不到，没能核对',
+    no_user_dir: '域账号目录不存在，没能核对',
+    no_user: '没设域账号，没能核对',
+    error: '核对出错',
+  }[r.reason]
+  showNotification(
+    '今天该上报会话了',
+    why ? (why + ' —— 已经报过就忽略这条') : '今天还没有上报记录 · 点这里打开上报日历',
+    // 提醒是不是响铃跟着全局的「提醒响铃」走；但**不受「系统通知」管** ——
+    // 那个开关管的是会话状态跃变的轰炸，跟一天四次的上报提醒不是一回事，
+    // 上报提醒有自己的开关。
+    !settings.sound,
+    '',
+    () => openUploadPanel(),
+  )
+
+  // 提醒但不抢焦点，与会话跃变提醒同一套：Windows 闪任务栏，macOS 弹 Dock
+  if (win && !win.isDestroyed() && !win.isFocused()) {
+    if (process.platform === 'darwin') { try { app.dock.bounce('informational') } catch (_) { } }
+    else { try { win.flashFrame(true) } catch (_) { } }
+  }
+}
+
+// 提醒设置走自绘对话框（原生菜单没有输入控件，先例见自动删除阈值那条）。
+//
+// 时间格式的权威只有 upload-core.parseTimes 一处：渲染层把原始输入整个送过来，
+// 看不懂的条目由这里回报、由它显示。两边各写一套正则的话，迟早出现
+// "对话框收了、落盘时被丢掉"这种静默不一致。
+ipcMain.handle('board:setRemind', (_e, on, rawTimes) => {
+  const { times, dropped } = uploadCore.parseTimes(rawTimes)
+  // 有看不懂的就整个不保存 —— 半套生效比不生效更难查
+  if (dropped.length) return { ok: false, dropped }
+  settings.uploadRemind = !!on
+  settings.uploadRemindTimes = times
+  saveSettings()
+  return { ok: true, on: settings.uploadRemind, times }
+})
+
+// 自绘设置面板里点「修改提醒时间…」-> 复用原生菜单那条同样的对话框链路，
+// 不为面板另写一份（参数与默认值都从 upload-core 带过去，只有一处权威）。
+ipcMain.on('board:askRemindTimesNow', () => {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('board:askRemindTimes', {
+      on: !!settings.uploadRemind,
+      times: (settings.uploadRemindTimes || []).slice(),
+      defaults: uploadCore.DEFAULT_REMIND_TIMES.slice(),
+      nasUser: String(settings.nasUser || ''),
+    })
+  }
+})
+
 ipcMain.on('board:settingsMenu', (e) => {
   const cb = (label, key) => ({
     label,
@@ -675,6 +972,44 @@ ipcMain.on('board:settingsMenu', (e) => {
     { type: 'separator' },
     cb('提醒响铃', 'sound'),
     cb('系统通知', 'notify'),
+    // 上报提醒自成一组（子菜单），和「外观」「自动删除残留记录」同一个处理 ——
+    // 它有两个东西要管（开关 + 时间点），平铺在顶层会和「提醒响铃」「系统通知」
+    // 这些单开关混在一起，层级读不出来。
+    {
+      label: '会话上报提醒',
+      submenu: [
+        // 开关做成真 checkbox。之前只有一个"带括号的普通项"，夹在两个真 checkbox
+        // 中间却没有勾，一眼看过去像是关着的 —— 实测被误读过。
+        cb('开启提醒', 'uploadRemind'),
+        { type: 'separator' },
+        {
+          // 时间是多选且允许非整点，原生菜单表达不了，所以走自绘对话框。
+      // 标签**不要**前置空格做缩进：原生菜单里 checkbox 会占一列，
+      // 缩进出来的空白正好落在那一列上，看着就是"一个没打勾的复选框"（实测被这么读过）。
+      // 它是动作项不是开关，靠动词 + 省略号表达"点了会弹窗"就够。
+      //
+      // 当前时间点**不写进标签**：值在对话框里就看得见，写在这儿只是让菜单变长
+      // （四个时间点能占半行）。改放 toolTip —— 想确认时悬停一下，不占版面。
+      label: '设置提醒时间…',
+      toolTip: '当前：' + describeRemind() + '\n'
+        + '到点提醒你上报当天的会话；当天已经报过就不再提醒。'
+        + '不受「系统通知」开关管，它有自己的开关',
+      click: () => {
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('board:askRemindTimes', {
+            on: !!settings.uploadRemind,
+            times: (settings.uploadRemindTimes || []).slice(),
+            // 「恢复默认」要用的那一组，从数据层带过去 ——
+            // 渲染层自己抄一份的话，改了默认值必然漏掉其中一处
+            defaults: uploadCore.DEFAULT_REMIND_TIMES.slice(),
+            // 核对靠的就是这个账号，空着要在对话框里明说，否则"为什么老提醒"无从查起
+            nasUser: String(settings.nasUser || ''),
+          })
+        }
+          },
+        },
+      ],
+    },
     { type: 'separator' },
     { ...cb(foldedLabel, 'showFolded'), label: foldedLabel },
     {
@@ -765,6 +1100,11 @@ if (!app.requestSingleInstanceLock()) {
     tick()
     timer = setInterval(tick, REFRESH_MS)
 
+    // 上报提醒单独一个慢周期，不搭 tick 的车 —— 它到点要读 NAS，
+    // 混进 1.5 秒的循环就成了后台轮询共享盘。首次检查也等这 30 秒：
+    // 开机那一刻正忙，没必要再挤一次网络读进去。
+    remindTimer = setInterval(checkUploadReminder, REMIND_CHECK_MS)
+
     // 切窗口用的助手 exe：放在这里编，是因为此刻没人在等 —— 编译约 1 秒，
     // 挪到第一次点击时做就正好把那一秒摊在最该快的路径上。已存在则直接返回。
     ensureFocusHelper()
@@ -796,6 +1136,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     if (timer) clearInterval(timer)
+    if (remindTimer) clearInterval(remindTimer)
     saveSettings()
   })
 }

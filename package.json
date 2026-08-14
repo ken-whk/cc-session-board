@@ -1,7 +1,7 @@
 {
   "name": "claude-session-board",
   "version": "2.1.0",
-  "description": "Claude 会话看板 —— 并发会话状态面板（Windows / macOS）",
+  "description": "Claude Code 会话看板 —— 并发会话状态面板（Windows / macOS）",
   "main": "app/main.js",
   "scripts": {
     "start": "electron .",

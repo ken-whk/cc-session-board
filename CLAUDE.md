@@ -1,4 +1,4 @@
-# Claude 会话看板（session-board）
+# Claude Code 会话看板（session-board）
 
 本机自建的并发会话状态面板。远端 `github.com/ken-whk/cc-session-board`（私有仓，分支 `main`）。
 
@@ -35,28 +35,25 @@
 
 **一行是否存在 = 注册表 ∪ state 文件的并集。** 注册表读不到时整体降级回 hook 推导，且不再判定「已关闭」。
 
-hook 事件映射：`UserPromptSubmit`→running / `Stop`→done / `Notification`→waiting / `SessionEnd`→closed（删 state 文件）。
+hook 事件映射：`UserPromptSubmit`→running / `Stop`→done / `Notification`→waiting / `SessionEnd`→closed（删 state 文件）。**例外**：`Notification` 且 `notification_type=idle_prompt` 不落记录（铁律 9）。
 
 ---
 
-## 换了机器怎么接着做
+## 上报提醒
 
-**必须 clone 到 `~/.claude/session-board/`**，不能放别处 —— `board-core.js` 的 `INSTALL_DIR` 和注册进 `settings.json` 的 hook 路径都以它为准（见铁律 4）。
+> 判定分两半（`dueReminders` 纯函数 + `hasUploadedOn` 读 NAS），产品决策与自检做法见 [`docs/upload-reminder.md`](docs/upload-reminder.md)。下面四条是不看文档也不能踩的：
 
-```
-git clone https://github.com/ken-whk/cc-session-board.git ~/.claude/session-board
-cd ~/.claude/session-board
-npm i          # node_modules 不进仓；只有打包才真正需要它，npm start 也依赖 electron
-npm start      # 从源码跑，开发时用这个
-node install-hooks.js    # 注册 4 个 hook（首次启动时 app/first-run.js 也会自动做）
-```
+- **`hasUploadedOn` 必须异步**。同文件其余读法是同步的，那些人点了才跑；这个后台定时跑，SMB 挂住时同步版会把主进程连同 1.5 秒刷新循环一起冻住，现象是"每天晚上定时卡一下"，根因指不回来。
+- **`ok` 与 `uploaded` 是两件事**。`ok=false` 是"核对不了"，不等于"没报"——域账号打错一个字母就走这条，合成一个布尔会让看板一口咬定今天没报（铁律 9 同类）。
+- **读 NAS 失败也要记账**。不记的话下一个 30 秒周期立刻重来，断网的晚上变成每半分钟一条通知。
+- **别挂到 `tick()` 上**。到点才读，一天最多四次；进刷新循环等于后台轮询共享盘。
 
-跟着仓库走的：代码、`README.md`、**本文件**（所有踩过的坑）。
-**不跟着走**的：`state/` `hidden.json` `ui*.json`（本机运行数据，by design）、以及这台机器 Claude Code 的 memory —— 所以别把作业约束写进 memory，**写进本文件**。
+---
 
-新机器只需要 node + Claude Code；不需要 PowerShell 特定版本（三个 .ps1 只是调试工具，不跑也不影响看板）。
+## 换机器 / 打包分发
 
-从源码跑（`npm start`）比装打包版省事：**没有"同步进 bundle"这一步**，改完重启即可。只有要发给别人时才需要打包（见文末「分发」）。
+> 见 [`docs/runbook.md`](docs/runbook.md)：**必须 clone 到 `~/.claude/session-board/`**（铁律 4）；日常改动不需要打包；打包有四个静默失败点。
+> 这两件事刻意去查即可，不占常驻额度 —— 本文件只装"改代码前必须知道"的。作业约束别写进 memory（不跟仓库走），**写进本文件**。
 
 ---
 
@@ -154,11 +151,24 @@ cp hook.js "$BUNDLE/resources/app/hook.js" && cmp -s hook.js "$BUNDLE/resources/
 
 2026-08-13 加入第三个词「删除记录」—— 它和前两个是**不同的动作**，不是同义词：隐藏留数据可找回，删除真删且不可撤销（见铁律 6b）。选「删除」不选「清除」，因为后者听起来像批量操作。新增文案只能在这三个里挑，别再造第四个。
 
+上报那条线同理，只有「**上报日历**」一个词：按钮、窗口标题、通知落点全用它。2026-08-14 把原来的「归档」改掉，是因为提醒文案说的是"该**上报**了"，而入口上一个「上报」都没有 —— 被提醒之后在界面上找不到该点哪儿。**「归档」已废**，别再冒出来。
+
 ### 8. 界面重绘类问题用抓帧比对，别猜
 
 `watch-flicker.ps1` 连续截同一窗口区域逐像素 diff，看 changed 数量与 bbox —— bbox 形态能直接区分"几个数字在变"和"整片重绘"。当年靠它才定位到 WinForms 版闪烁的元凶是 ToolTip 而非刷新逻辑。`capture.ps1` 截当前窗口存 `board-capture.png`。两个都按**窗口标题 + 最小尺寸**匹配，与 UI 框架无关。
 
-`close-board.ps1` 发 `WM_CLOSE` 而不是杀进程 —— 走正常关闭路径，`win.on('close')` 里的 `saveSettings` 才会执行。调试时想保住窗口位置/勾选项就用它。
+`close-board.ps1` 本意是发 `WM_CLOSE` 走正常关闭路径（`win.on('close')` 里的 `saveSettings` 才会执行）。**但它至今匹配的是 `CommandLine -like '*board-wpf*'`，WPF 版 2026-08-10 已删，所以它对 Electron 版恒返回 "no board running"** —— 要保住窗口位置/勾选项，目前只能自己给主窗口 `PostMessage WM_CLOSE`，然后再 `Stop-Process`（关窗口不退进程，它是托盘应用，`window-all-closed` 故意留空）。
+
+### 9. 信号归因：别拿 A 的证据去解释 B
+
+这一类错误反复踩，共性是**用一个来源的事实去断言另一个对象**，且错的方向往往偏"看起来正常"。六条实证结论：
+
+- **状态档只反映主循环**。子代理 / 后台 shell 不改状态档、不改配色与排序，只在状态文字后加「· N 个子任务」后缀。曾有过「⧗ 后台任务」一档，已按明确要求撤掉 —— 想加回来先确认是不是真要它。
+- **空闲通知不是新事实**。`Notification` 且 `notification_type=idle_prompt` 一律不落记录：轮次早在 `Stop` 时结束了，收下它会把「已完成」冲成「等你输入」、把 summary 覆盖成一句废话、把 `updated_ms` 刷成通知时刻让「等你多久」重新起算。按**白名单**挡，认不出的取值沿用旧行为（宁可多叫你一次，不可漏掉真的等授权）。
+- **mtime 不是判活信号**。子代理写入间隔实测 189 份记录 p50=86s / p90=213s，30 秒窗口下 **95%** 会中途掉出计数。判活 = 10 分钟兜底窗口 + 「晚于该文件最后一次写入的 completed 通知」；通知**只用来证明"已完成"**，反过来用（没通知=还在跑）会在会话空闲时永远误报。后台 Agent 的 `tool_result` 在 spawn 那一刻就落了（实测 use→result 间隔 0.0s），**不是**完成信号。
+- **共享快照里 `updated_at` 是写盘时刻，不是取数时刻**。用量快照全部会话共写一个文件，落后会话会把旧读数配上新鲜时间戳写回去（实测 5h 在 31%/18% 间来回，周期 2–5 秒）。所以"取更新的"没用；只能按配额窗口语义取同 `resets_at` 内的最大值，更旧窗口整条忽略，`resets_at` 已成过去时的不显示。
+- **无终端指纹 ≠ 裸 cmd**。SDK 会话（注册表 `entrypoint=sdk-*`）没有自己的窗口、模型也由宿主选。判成 `console` 会让切窗口只在 conhost/cmd/powershell 里找、永远找不到；`settings.json` 的上下文窗口对它同样不是证据（实测宿主给的是 200k 模型，167k 被按你的 1M 算成 17%，真实约 84% —— 把快撑满显示成很安全）。宿主档由注册表 `entrypoint` 接管，不必等下一次 hook 事件。
+- **窗口标题按词边界匹配**。`oteapi` 会被 `oteapi-facade` 子串劫持，而多个候选之间由 z 序决胜 —— 表现为跟着你最后碰过的窗口漂，不是稳定地错，因此更难查。JetBrains 多个项目窗口住在**同一个** idea64 进程里，pid 也分不开它们。
 
 ---
 
@@ -179,18 +189,7 @@ node board-core.js --json     # 结构化输出
 
 - **强杀 / 直接关终端 / 关机不触发 `SessionEnd`**，记录会残留。transcript 文件锁、`~/.claude/ide/*.lock` 两条替代判活路子实测都不通，只能靠 pid 交叉校验。残留本身已由「删除记录」+ 自动删除兜住（铁律 6b），但**触发不了 `SessionEnd` 这件事本身绕不过**——别再往这个方向试。
 - **终端标签页名读不到**。VS Code 那个 `· Claude Code` 标签与 Claude 会话无任何数据关联，已按字节全量搜过 `~/.claude` 全树 + VS Code storage，0 命中。要稳定命名只能自建别名。
-- **双击只能打开目录**，切不到那个终端窗口 —— 拿不到窗口句柄。
+- **切窗口只能落到「窗口」，落不到「标签页」**。（这条原先写的是"只能打开目录、拿不到窗口句柄"，已被切窗口功能推翻，勿再照抄。）VS Code / IDEA 把工作区名写进窗口标题、但不写标签页，同一窗口里的多个会话必然塌缩成同一个目标；SDK 会话更是全归宿主窗口。
 
 ---
 
-## 分发
-
-**日常改动不需要打包** —— 改完 JS/HTML 同步进 `D:\Tools\...\resources\app\` 再重启即可（见铁律 1、2）。
-
-真要重新发给同事时：
-
-1. **先 `npm i`** —— `node_modules/`（electron + electron-packager，约 374M）已在 2026-08-10 清理时删掉，仓里只有 `package.json` / `package-lock.json`。不装依赖直接跑 `npm run pack:*` 会失败。
-2. `npm run pack:win` / `npm run pack:mac`，产物落 `dist/`（该目录里旧的两个包已删，是可重新生成的产物）。
-3. **打 macOS 包必须提权**（或开开发者模式）：`.app` 内含 14 个符号链接，Windows 建符号链接要管理员权限。不满足时 electron-packager **只打印一行 skip 然后什么都不产出**，不报错也不退出非零，极易误判成"打好了"。自查 `find X.app -type l | wc -l` 应为 14。
-4. **必须用 tar.gz 传 macOS 包**，zip 会破坏符号链接；Mac 侧也必须 `tar -xzf`，不能双击解压。执行位在 NTFS 上必然丢失，要 Mac 侧 `chmod +x`，外加 `xattr -dr com.apple.quarantine` 解 Gatekeeper 隔离。
-5. **打完审隐私**：`--ignore` 漏了会把 `state/`（含你的会话标题、项目路径、你敲的原话）、`_last-payload-*.json`（含 prompt 原文）、UI 设置、调试截图一起打进去。曾实测把含会话标题和项目路径的 `board-capture.png` 打进过两个包。打完 grep 一遍产物确认。
