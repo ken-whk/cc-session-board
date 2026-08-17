@@ -9,6 +9,16 @@
   /* 主题变量。深色不是"把白色反过来"就完事 —— 状态色、柱子里的数字、
      行底色都得各有一套，所以全部收进变量，两套主题各赋一次值。 */
   :root {
+    /* 圆角刻度。三个视图此前各写字面量，量下来是 3/4/5/6/8/10/12 七档 ——
+       其中 4px 和 6px 只是 5px 的抖动（同一类控件在列表里 4px、日历里 6px、
+       设置里 5px），切个 tab 同一个东西换个长相。中间那档收成一个值。
+       保留的三档各有实际语义：chip 是小角标、box 是成块的容器、卡片和药丸
+       各自更大 —— 它们不是抖动，是不同尺度的东西。
+       字号同理已经收成 15 组标题 / 13 正文 / 12 次要 / 11 注释四档，
+       新加样式沿用这四档，别再引入第五个数。 */
+    --r-ctl: 5px;
+    --r-chip: 3px;
+    --r-box: 8px;
     --bg: #ffffff;
     --fg: #222222;
     --fg-dim: #9a9a9a;
@@ -94,7 +104,7 @@
   /* 滚动条也要跟主题。默认滚动条在深色下是一条亮灰，比不做深色更扎眼。 */
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-track { background: var(--panel); }
-  ::-webkit-scrollbar-thumb { background: var(--track-line); border-radius: 5px; border: 2px solid var(--panel); }
+  ::-webkit-scrollbar-thumb { background: var(--track-line); border-radius: var(--r-ctl); border: 2px solid var(--panel); }
   ::-webkit-scrollbar-thumb:hover { background: var(--grip); }
   ::-webkit-scrollbar-corner { background: var(--panel); }
   html, body {
@@ -132,10 +142,12 @@
   /* 视图 tab。放在自绘标题栏里而不是单开一行：窗口默认只有 620px 高，
      再占 28px 会直接吃掉一行会话。第一个 tab 同时充当应用名 ——
      原来那个 .apptitle 就是干这个的，合并掉不必两处都占位。 */
+  /* 20px：标题栏 34px 高，再大就顶满、和 tab 的视觉重量失衡 */
+  .applogo { width: 20px; height: 20px; flex: none; margin-right: 4px; display: block; }
   .tabs { display: flex; gap: 2px; flex: none; }
   .tab {
     font: inherit; font-weight: 600; white-space: nowrap; cursor: pointer;
-    padding: 3px 10px; border: 1px solid transparent; border-radius: 5px;
+    padding: 3px 10px; border: 1px solid transparent; border-radius: var(--r-ctl);
     background: transparent; color: var(--muted-strong);
   }
   .tab:hover { background: var(--head-hover); }
@@ -143,15 +155,29 @@
      这正是要 tab 的原因，所以别把它做得含糊 */
   .tab.on { background: var(--sel); color: var(--fg); border-color: var(--border); }
   .bar label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
-  /* 按钮必须跟着主题走。浏览器默认按钮在深色下是一块白，
-     比不做深色更难看 —— 主题化不能只做背景和文字。 */
-  .bar button {
+  /* 按钮的唯一外观。刻意用**元素选择器**作用到整个窗口 ——
+     原先只有 `.bar button` 和 `.sheet .form button` 两条几乎一样的规则，于是
+     后来加的按钮全落在浏览器默认样式上：归档面板的「上报当日 / 刷新 / 关闭」、
+     日历的 ‹ ›、设置页的「完成 / 修改… / 收起来 / 应用 / 设置…」共 8 个（当时的标签）。
+     默认按钮在深色主题下是一块白，比不做深色更难看；设置页显得"机械"
+     也主要是这个原因 —— 一排系统灰方块，和页面其余部分不像一套东西。
+     用元素选择器的收益是新加按钮默认就跟主题，不用记得挂 class；
+     需要不同长相的（tab / 分段控件 / 对话框主按钮 / 纯文字链接）都已经用
+     class 定义，class 优先级高于元素选择器，不会被这条拽回去。 */
+  button {
     font: inherit; padding: 3px 9px; cursor: pointer;
     background: var(--chip-bg); color: var(--fg);
-    border: 1px solid var(--track-line); border-radius: 5px;
+    border: 1px solid var(--track-line); border-radius: var(--r-ctl);
   }
-  .bar button:hover { background: var(--head-hover); }
-  .bar button:active { background: var(--track-bg); }
+  button:hover { background: var(--head-hover); }
+  button:active { background: var(--track-bg); }
+  /* 只在键盘操作时出现（focus-visible 而非 focus），鼠标点击不会留下一个框 */
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  /* 置灰必须自己画：我们把 background/color 都指定死了，浏览器默认那点
+     禁用态灰化压不过来，看着和可点的一模一样。
+     hover 也要一并压掉 —— 灰按钮还跟手变色，等于在说"我能点"。 */
+  button:disabled { opacity: .42; cursor: default; }
+  button:disabled:hover, button:disabled:active { background: var(--chip-bg); }
   /* 现在住在状态栏里，字号跟着那一行走 */
   .stat { color: var(--fg); font-size: 12px; }
   .stat b { font-weight: 600; }
@@ -262,7 +288,7 @@
   .hbadge {
     display: inline-block; padding: 0 4px;
     font-size: 10px; line-height: 15px; font-weight: 700; letter-spacing: .6px;
-    color: var(--badge-fg); border: 1px solid var(--badge-line); border-radius: 3px;
+    color: var(--badge-fg); border: 1px solid var(--badge-line); border-radius: var(--r-chip);
     font-family: Consolas, 'Cascadia Mono', monospace; vertical-align: middle;
   }
   /* 判据没有样本验证过的宿主用虚线框 —— 显示错了要有迹可循，
@@ -277,7 +303,7 @@
         两侧都得读得清；实色填充会把压在上面的那半截数字吃掉。 */
   .meter {
     position: relative; display: inline-block; vertical-align: middle;
-    width: 60px; height: 20px; border: 1px solid var(--track-line); border-radius: 4px;
+    width: 60px; height: 20px; border: 1px solid var(--track-line); border-radius: var(--r-ctl);
     background: var(--track-bg); overflow: hidden;
   }
   .meter i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; }
@@ -369,6 +395,15 @@
     display: none; align-items: center; justify-content: center; z-index: 20;
   }
   .mask.on { display: flex; }
+  /* 自绘标题栏时，遮罩从标题栏**下方**开始。
+     最小化/最大化/关闭那三个按钮是**系统画的**，合成在网页内容之上 ——
+     页面的遮罩压不暗它们。整片变暗后右上角就剩一块亮白方块，看着像浮在
+     外面的另一个窗口（截图实证）。与其让它孤零零地亮着，不如让整条标题栏
+     都不参与变暗：一整行都是正常亮度就成立了，中间缺一块才不成立。
+     代价：弹窗开着时顶栏仍可点 —— 而点 tab 本来就会先关掉弹窗、点 ⚙ 是
+     开关它自己，两个行为都合理，不用额外挡。
+     Linux 没有 overlay（USE_OVERLAY=false，body 不带 .overlay），仍整屏变暗。 */
+  body.overlay .mask { top: env(titlebar-area-height, 34px); }
 
   /* 阈值输入对话框。复用 .mask/.sheet 的遮罩与卡片，只把宽度收窄 ——
      Electron 的原生对话框没有文本输入（showMessageBox 只有按钮），
@@ -381,41 +416,52 @@
   .sheet .form .cur { margin: 0; font-size: 13px; color: var(--fg); }
   .sheet .form .cur b { font-weight: 600; }
   .sheet .form .frow { display: flex; align-items: center; gap: 8px; }
-  .sheet .form input, .sheet .form select {
-    font: inherit; padding: 4px 8px; color: var(--fg);
-    background: var(--chip-bg); border: 1px solid var(--track-line); border-radius: 5px;
+  /* 输入框的唯一外观，三处共用（对话框 / 归档账号 / 设置页）。
+     与按钮**刻意不同色**：按钮是 --chip-bg 浅灰填充 + --track-line 描边，
+     输入框是 --bg 底 + --border 描边。原先对话框里的输入框用的正是按钮那套
+     灰底，结果一个能填、一个能点，看着一模一样；而且灰底文本框像是禁用的。
+     "填 vs 点"是这个窗口里最该一眼分清的两类控件，所以让它成为规则的一部分。
+     排除复选框：它今天也被这条规则匹配到，白拿了描边、灰底和 4px 内边距 ——
+     原生复选框被这么一改就不再是系统那个样子（提醒对话框里那个「开启上报
+     提醒」正是），而它本该保持原生长相。 */
+  .sheet .form input:not([type=checkbox]), .sheet .form select,
+  .arcombo input, .sttext, .stnum {
+    font: inherit; padding: 3px 7px; color: var(--fg);
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-ctl);
+  }
+  .sheet .form input:not([type=checkbox]):focus, .sheet .form select:focus,
+  .arcombo input:focus, .sttext:focus, .stnum:focus {
+    outline: none; border-color: var(--accent);
   }
   .sheet .form input { width: 92px; }
   .sheet .form .err { margin: 0; font-size: 12px; color: var(--c-asking); min-height: 16px; }
   .sheet .form .btns { display: flex; gap: 8px; justify-content: flex-end; }
   .sheet .form .btns .grow { flex: 1; }
-  .sheet .form button {
-    font: inherit; padding: 4px 12px; cursor: pointer;
-    background: var(--chip-bg); color: var(--fg);
-    border: 1px solid var(--track-line); border-radius: 5px;
-  }
-  .sheet .form button:hover { background: var(--head-hover); }
-  .sheet .form button.primary { background: var(--c-running); border-color: var(--c-running); color: #fff; }
+  /* 对话框按钮只有内边距跟全窗口那条不同 —— 这里是"确定 / 取消"这类终局动作，
+     点击目标做大一点；颜色描边圆角 hover 一律共用，不再抄一份 */
+  .sheet .form button { padding: 4px 12px; }
+  /* 选中/主按钮一律用 --accent，不用 --c-running。
+     后者是**状态色**（会话运行中），浅色主题下两者恰好同值、深色主题下不同
+     （#4a9eff vs #64b5f6），于是"选中"在设置页和对话框里是两个蓝。
+     这个文件别处已经立过规矩：色相是状态列的专属信号，界面状态不该借用它。 */
+  .sheet .form button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .sheet .form button.primary:hover { filter: brightness(1.08); }
 
-  /* 上报提醒：整点九宫格。
-     用格子而不是一串 checkbox —— 24 个 checkbox 竖着排要滚动，而"我想在
-     晚上那几个点被叫"是个一眼扫过去就该点完的决定。 */
-  .sheet .form .hgrid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 5px; }
-  .sheet .form .hgrid button {
-    padding: 5px 0; font-variant-numeric: tabular-nums; text-align: center;
+  /* 提醒时间清单：竖排一行一个，右侧一个删除按钮。
+     原先是"整点九宫格 + 非整点输入框"，整点和非整点分居两处 ——
+     看不出最终会在哪几个点被叫，得自己把两处并起来想。清单没有这个问题：
+     它显示的就是最终结果本身。 */
+  .rmlist { display: flex; flex-direction: column; margin: 2px 0 0; }
+  .rmitem {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 2px; border-bottom: 1px solid var(--line);
   }
-  .sheet .form .hgrid button.on {
-    background: var(--c-running); border-color: var(--c-running); color: #fff;
-  }
-  .sheet .form .hgrid button.on:hover { filter: brightness(1.08); }
-  /* 「开启」关掉时整块压暗但**仍可点** —— 先挑好时间再开开关是很自然的顺序，
-     禁用掉会逼人倒过来操作 */
-  .sheet .form .dim { opacity: .45; }
-  .sheet .form .chk { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
-  .sheet .form .chk input { width: auto; margin: 0; }
-  /* 另加的非整点时间：这行要占满宽度，不用上面 92px 的窄输入框 */
-  .sheet .form .frow input.wide { width: auto; flex: 1; }
+  .rmitem:last-child { border-bottom: none; }
+  .rmitem b { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .rmitem .grow { flex: 1; }
+  .rmitem button { padding: 1px 8px; line-height: 1.5; color: var(--muted); }
+  .rmitem button:hover { color: var(--c-asking); }
+  .rmempty { padding: 10px 2px; color: var(--muted); }
   .sheet {
     width: min(820px, 94vw); max-height: 88vh;
     display: flex; flex-direction: column; overflow: hidden;
@@ -430,7 +476,7 @@
   .sheet header .sub { font-size: 12px; color: var(--muted); }
   .sheet header .x {
     margin-left: auto; border: 0; background: transparent; font-size: 16px;
-    line-height: 1; cursor: pointer; color: var(--muted); padding: 4px 6px; border-radius: 5px;
+    line-height: 1; cursor: pointer; color: var(--muted); padding: 4px 6px; border-radius: var(--r-ctl);
   }
   .sheet header .x:hover { color: var(--fg); background: var(--head-hover); }
   /* 行距刻意压紧：窗口默认只有 620px 高，面板一屏能装多少直接决定要翻几页。
@@ -439,16 +485,21 @@
 
   /* 小标题用左侧色条而不是全大写 —— 中文没有 uppercase，
      靠字号和颜色区分层级在中文里区分度不够。 */
+  /* 与设置页同一档：15px 正文色 600。原先 12px 灰 + 左侧色条 —— 色条是这个
+     文件里独一份的装饰，与别处不成套；字号又太小，压不住下面一整片表格，
+     滚起来没有停顿点（实测 4.9 屏全是同一个视觉重量）。 */
   .sheet h3 {
-    margin: 16px 0 7px; padding-left: 9px; font-size: 12px; font-weight: 600;
-    color: var(--muted); border-left: 3px solid var(--track-line);
+    margin: 26px 0 6px; font-size: 15px; font-weight: 600; color: var(--fg);
   }
-  .sheet h3:first-child { margin-top: 12px; }
+  .sheet h3:first-child { margin-top: 10px; }
   .sheet p.lead { margin: 0 0 8px; color: var(--fg); }
+  /* 紧跟在表格后面的整段说明要拉开距离 —— 不拉开的话它紧贴最后一行，
+     看着像"表格里跑出来的一行"，而它讲的是另一层意思。 */
+  .sheet table + p.lead { margin-top: 14px; }
 
   .sheet table { width: 100%; border-collapse: collapse; }
   .sheet tr + tr td { border-top: 1px solid var(--line); }
-  .sheet td { padding: 4px 10px 4px 0; vertical-align: top; border: 0; }
+  .sheet td { padding: 6px 10px 6px 0; vertical-align: top; border: 0; }
   /* 三列固定宽度：字形 / 名称 / 释义 —— 释义在整个面板里对齐到同一条竖线上，
      左边缘参差是"看着乱"最主要的来源。 */
   .sheet td.g { width: 22px; text-align: center; font-weight: 700; padding-right: 8px; }
@@ -457,18 +508,18 @@
   .sheet .src td.k { width: 210px; font-weight: 400; color: var(--fg); }
   .sheet .src td.d { color: var(--muted); }
   .sheet code {
-    background: var(--chip-bg); border: 1px solid var(--chip-line); border-radius: 4px;
+    background: var(--chip-bg); border: 1px solid var(--chip-line); border-radius: var(--r-chip);
     padding: 1px 5px; font-family: Consolas, "SF Mono", monospace; font-size: 12px;
   }
   kbd {
     display: inline-block; min-width: 20px; text-align: center;
     background: var(--chip-bg); border: 1px solid var(--track-line);
-    border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px;
+    border-bottom-width: 2px; border-radius: var(--r-ctl); padding: 1px 6px;
     font: inherit; font-size: 11px; color: var(--fg);
   }
   .swatches {
     display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px;
-    background: var(--bar-bg); border: 1px solid var(--chip-line); border-radius: 8px; padding: 12px;
+    background: var(--bar-bg); border: 1px solid var(--chip-line); border-radius: var(--r-box); padding: 12px;
   }
   .swatches .s { display: flex; flex-direction: column; align-items: center; gap: 5px; }
   .swatches .s em { font-style: normal; font-size: 11px; color: var(--muted); }
@@ -505,9 +556,8 @@
   body.archive-on .offhint { display: none; }
   .arbar {
     flex: none; display: flex; align-items: center; gap: 10px;
-    padding: 8px 12px; border-bottom: 1px solid var(--line);
+    padding: 8px 10px; border-bottom: 1px solid var(--line);
   }
-  .arbar .t { font-weight: 600; }
   .arbar .grow { flex: 1; }
   .arhint { color: var(--muted); font-size: 12px; }
   .arwarn { color: var(--imminent-fg); }
@@ -515,22 +565,18 @@
   #arLeft { width: 380px; flex: none; border-right: 1px solid var(--line); overflow: auto; }
   #arRight { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   .arhead {
-    flex: none; padding: 7px 12px; font-weight: 600;
+    flex: none; padding: 7px 10px; font-weight: 600;
     border-bottom: 1px solid var(--line);
   }
   #arDetail { flex: 1; overflow: auto; min-height: 0; }
   /* 账号：自绘下拉（原生 datalist 条目多时在 Windows 上滚不动） */
   .arcombo { position: relative; display: inline-block; }
-  .arcombo input {
-    font: inherit; padding: 2px 7px; width: 140px;
-    border: 1px solid var(--border); border-radius: 4px;
-    background: var(--bg); color: var(--fg);
-  }
-  .arcombo input:focus { outline: none; border-color: var(--accent); }
+  /* 外观走全窗口共用的那条输入框规则，这里只给宽度 */
+  .arcombo input { width: 140px; }
   #arUList {
     position: absolute; top: calc(100% + 3px); left: 0; z-index: 40;
     min-width: 100%; max-height: 260px; overflow-y: auto;
-    background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: var(--r-ctl);
     box-shadow: 0 6px 18px rgba(0, 0, 0, .18);
   }
   .aruitem { padding: 5px 10px; cursor: pointer; white-space: nowrap; font-size: 12px; }
@@ -543,8 +589,9 @@
   /* 日历。配色分工：淡底+accent 数字 = 报过；实心 accent = 当前查看。
      只有选中用强色 —— 把"报过"做成饱和色会让整月像热力图，且强色被占掉后
      选中态只能再找更抢眼的画法，越叠越糟。 */
-  .arcal { padding: 12px 14px 14px; }
+  .arcal { padding: 12px 10px 14px; }
   .arcalbar { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .arcalbar button { padding: 0 10px; font-size: 15px; line-height: 22px; color: var(--muted-strong); }
   .arcalbar .m { flex: 1; text-align: center; font-weight: 600; font-size: 13px; }
   .argrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
   .arwd {
@@ -552,7 +599,7 @@
     padding-bottom: 6px; margin-bottom: 2px; border-bottom: 1px solid var(--line);
   }
   .arcell {
-    height: 40px; border-radius: 6px; cursor: pointer;
+    height: 40px; border-radius: var(--r-ctl); cursor: pointer;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 1px; line-height: 1.1; font-variant-numeric: tabular-nums; color: var(--fg);
   }
@@ -563,33 +610,42 @@
   .arcell.on, .arcell.on:hover { background: var(--accent); }
   .arcell.on .arn, .arcell.on .ard { color: #fff; }
   .ard { font-size: 13px; }
-  .arn { font-size: 10px; color: var(--accent); font-weight: 600; }
+  .arn { font-size: 11px; color: var(--accent); font-weight: 600; }
   .arcell.out .arn { color: var(--muted); font-weight: 400; }
-  .arcell.today .ard { font-weight: 700; box-shadow: inset 0 -2px 0 var(--accent); }
-  .arcell.on.today .ard { box-shadow: inset 0 -2px 0 #fff; }
+  /* 今天：给**格子**描一圈，不动数字本身。
+     原先是在数字底下画一条 2px 下划线（inset box-shadow），它紧贴字底、
+     又正好夹在"日期"和"当天条数"两行之间，把一格里的东西挤成一坨。
+     描边走的是另一个通道 —— 淡底=报过、实心=当前查看，这两个都占着"填充"，
+     边框跟它们不抢；字重加粗留作第二重暗示。
+     outline 而不是 border：border 会占掉 1px 布局宽度，让今天这一格
+     比旁边窄一圈，整行跟着错位。 */
+  .arcell.today { outline: 1px solid var(--accent); outline-offset: -1px; }
+  /* 选中态整格是实心 accent，同色描边看不见，换成白色 */
+  .arcell.on.today { outline-color: #fff; }
+  .arcell.today .ard { font-weight: 700; }
   .arsum { margin-top: 12px; font-size: 12px; color: var(--muted-strong); }
   .arlegend {
     margin-top: 6px; font-size: 11px; color: var(--muted);
     display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
   }
   .arsw {
-    width: 12px; height: 12px; border-radius: 3px; flex: none;
+    width: 12px; height: 12px; border-radius: var(--r-chip); flex: none;
     background: var(--accent-soft); border: 1px solid var(--border); display: inline-block;
   }
   .arsw.sel { background: var(--accent); border-color: var(--accent); }
   /* 挂载引导：只在 NAS 读不到时出现 */
   .armount {
-    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+    padding: 10px; border-bottom: 1px solid var(--line); background: var(--panel);
   }
   .armount p { margin: 0 0 6px; font-size: 12px; color: var(--muted-strong); }
   .armount .row2 { display: flex; gap: 8px; margin: 8px 0 6px; flex-wrap: wrap; }
-  .arrow { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .arrow { padding: 8px 10px; border-bottom: 1px solid var(--line); }
   .arrow:hover { background: var(--hover); }
   .art1 { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .arproj { font-weight: 600; }
   .arcnt { color: var(--muted); font-size: 12px; }
   .artag {
-    font-size: 11px; padding: 0 5px; border-radius: 3px;
+    font-size: 11px; padding: 0 5px; border-radius: var(--r-chip);
     border: 1px solid var(--badge-line); color: var(--badge-fg);
   }
   .arprompt { color: var(--muted-strong); font-size: 12px; margin-top: 2px; }
@@ -597,7 +653,7 @@
     color: var(--muted); font-size: 11px;
     font-family: ui-monospace, Consolas, monospace; word-break: break-all;
   }
-  .arempty { padding: 18px 14px; color: var(--muted); }
+  .arempty { padding: 18px 10px; color: var(--muted); }
 
   /* ---- 自绘设置面板 ----
      Why 不用原生菜单：原生菜单**点任何一项都会整个关闭**（Win32 TrackPopupMenu /
@@ -606,34 +662,16 @@
      （自动删除的"自定义时长"就是这么被逼出来的先例）。
      面板一次解决这三件：不关、可连点、能放输入控件。
      全部 st 前缀：这个文件已经有 detail / clearDetail 等符号，撞名会静默出错。 */
-  /* 整页视图，和归档面板同一个套路：body 纵向 flex 里的一个兄弟槽位。
-     **不进 tab** —— tab 表示"你在浏览哪个内容"，设置是配置界面、不是内容，
-     并列进去会让 tab 的语义变浑。入口仍是 ⚙ 按钮，出口是面板里的「完成」。 */
-  #stPanel { flex: 1; min-height: 0; overflow: auto; font-size: 12px; }
-  #stPanel[hidden] { display: none; }
-  body.settings-on .wrap,
-  body.settings-on .detail,
-  body.settings-on #arPanel { display: none; }
-  /* 吸顶的那条通栏线交给外层，内容限宽居中与正文对齐。
-     不能在 sticky 元素上直接 margin:auto —— 它的包含块是滚动容器，居中会失效。 */
-  .sthead {
-    position: sticky; top: 0; z-index: 1; background: var(--bg);
-    border-bottom: 1px solid var(--line);
-  }
-  .sthead > .inner {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 18px; max-width: 656px; margin: 0 auto;
-    font-weight: 600; font-size: 13px;
-  }
-  .sthead .grow { flex: 1; }
-  /* 单列竖排。分过栏，但设置项的关系是「一组一组读下去」，分栏会让阅读顺序
-     在左右两列之间来回跳。宽度封顶：拉满 1000+px 时一行太长，扫起来要横跨半屏。 */
-  /* 居中而不是靠左：整页宽 1000+px、内容只占 620px，靠左会让右边空掉一大片，
-     视线也要一直偏在屏幕左侧。 */
-  .stbody {
-    padding: 6px 18px 28px; margin: 0 auto; max-width: 620px;
-    display: flex; flex-direction: column;
-  }
+  /* 弹窗形态，复用已有的 .mask + .sheet（帮助面板和两个对话框都是这一套）——
+     不新造一层浮层，也不另开 OS 窗口（多一个任务栏条目，而这是个改完就走的地方）。
+     早先做成"整页视图"：它会把列表整个顶掉，改一个开关得先失去全部上下文，
+     回来还要再点一次「完成」。设置是**临时打断**，弹窗才是它该有的形态 ——
+     背景仍看得见列表，Esc / 点空白即走。
+     宽度取 620：设置项是一组组竖着读的，一行太长扫起来要横跨半屏。 */
+  .sheet.settings { width: min(620px, 94vw); }
+  /* 12px 是这一片的基准字号（行标题 13 / 说明 11 都相对它定的），
+     而 .sheet 继承的是全局 13px，必须在这里压回来 */
+  .stbody { font-size: 12px; display: flex; flex-direction: column; }
   /* 组标题要压得住它下面那一组：比行标题(13px)大一号、用正文色而不是灰色。
      原来 12px 灰字比行标题还弱，扫下来分不出哪是分组、哪是设置项。
      层级：组标题 15px 粗 > 行标题 13px > 说明 11px 灰。 */
@@ -649,11 +687,20 @@
     padding: 11px 2px; border-bottom: 1px solid var(--line);
   }
   .strow:last-child { border-bottom: none; }
+  /* 必写：.strow 是 display:flex，会压过 [hidden] 的 UA display:none */
+  .strow[hidden] { display: none; }
   .stmain { flex: 1; min-width: 0; }
   .sttitle { font-size: 13px; }
   /* 说明只在「光看标签会误解」的行才写 —— 每行都挂一句会把版面变成说明书 */
   .stdesc { color: var(--muted); font-size: 11px; margin-top: 2px; line-height: 1.4; }
   .stctl { flex: none; display: flex; align-items: center; gap: 8px; }
+  /* 控件区竖排：给「选了某一档之后才出现的附加输入」用。
+     右对齐，让附加那行的右边缘与上面的分段控件对齐，不然会看着像另起了一栏。 */
+  .stctl.col { flex-direction: column; align-items: flex-end; gap: 8px; }
+  .stsub { display: flex; align-items: center; gap: 8px; }
+  /* 必写：作者样式的 display:flex 会压过 [hidden] 的 UA display:none，
+     漏了这条附加行就永远显示（归档面板踩过同一个坑）。 */
+  .stsub[hidden] { display: none; }
   /* 开关用滑块而不是复选框：复选框在设置项语境下表达的是「勾选一批」，
      而这些是各自独立的开/关状态，滑块语义更准，也更容易一眼看出当前值。 */
   .stsw { position: relative; width: 38px; height: 21px; flex: none; }
@@ -661,41 +708,58 @@
     position: absolute; inset: 0; width: 100%; height: 100%;
     margin: 0; opacity: 0; cursor: pointer;
   }
+  /* track / knob 都必须 pointer-events:none。
+     它们是绝对定位、且在 DOM 里排在 <input> **后面**，所以画在 input 上层；
+     漏掉这一条的话整个 38x21 的点击全被 track 接走，input 收不到，
+     开关看着能按、实际永远不动（6 个开关一起哑，实测 elementFromPoint
+     返回的正是 span.track）。knob 当初写了、track 漏了。 */
   .stsw .track {
-    position: absolute; inset: 0; border-radius: 999px;
+    position: absolute; inset: 0; border-radius: 999px; pointer-events: none;
     background: var(--border); transition: background .15s;
   }
+  /* 滑块保持白色、不进主题变量：它要在两种主题的**两种轨道色**上都读成
+     "凸起的那一块"（浅色关 #dddddd / 深色关 #2a2e33 / 两色开都是 accent 蓝），
+     白色 + 投影是唯一同时成立的选择。跟着主题翻成深色的话，深色主题下
+     深轨道配深滑块就糊成一整条了。 */
   .stsw .knob {
     position: absolute; top: 2px; left: 2px; width: 17px; height: 17px;
     border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
     transition: left .15s; pointer-events: none;
   }
-  .stsw input:checked ~ .track { background: #34c759; }
+  /* 「开」用 accent，不用绿。三条理由：
+     ① 本项目里"激活 / 选中"已经统一是 accent（分段控件选中、对话框主按钮、
+        日历当前查看日），开关的"开"是同一个概念，不该另起一套；
+     ② 绿色在这里**已经有主人** —— --c-done 是「已完成」状态色。再来一个
+        含义不同的绿就是跟状态列抢色相，而本文件立过规矩：色相是状态列的专属信号；
+     ③ 原来写死 #34c759（iOS 绿），既不在变量体系里、深浅两个主题还是同一个
+        饱和度 —— 深色底上偏亮。换成变量后自动跟着主题走。 */
+  .stsw input:checked ~ .track { background: var(--accent); }
   .stsw input:checked ~ .knob { left: 19px; }
   .stsw input:focus-visible ~ .track { outline: 2px solid var(--accent); outline-offset: 2px; }
   /* 互斥选项做成分段控件、靠右对齐 —— 同组候选一眼看全，比下拉少一次点击 */
-  .stseg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .stseg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-ctl); overflow: hidden; }
   .stseg button {
     font: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer;
     border: none; border-left: 1px solid var(--border);
     background: var(--bg); color: var(--muted-strong);
   }
   .stseg button:first-child { border-left: none; }
-  .stseg button:hover { background: var(--hover); }
+  /* hover 走按钮那档（--head-hover），不用列表行那档（--hover）——
+     两个值很接近，但分工是"按钮 hover"与"行 hover"，同类控件该同一个值 */
+  .stseg button:hover { background: var(--head-hover); }
   .stseg button.on { background: var(--accent); color: #fff; }
-  .stnum {
-    font: inherit; font-size: 12px; width: 58px; padding: 3px 6px; text-align: right;
-    border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg);
-  }
-  .sttext {
-    font: inherit; font-size: 12px; width: 140px; padding: 3px 7px;
-    border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--fg);
-  }
+  /* 同上：外观共用，这里只给各自的宽度与对齐 */
+  .stnum { width: 58px; text-align: right; }
+  .sttext { width: 140px; }
 </style>
 </head>
 <body>
 
 <div class="bar">
+  <!-- 应用图标。直接引 icon.png —— 页面本身就在 app/ 下，同目录相对路径即可，
+       不必再塞一份 data URI（那会让图标改了却忘了同步这里）。
+       刻意**不加** no-drag：它是装饰，压在标题栏的拖拽区里正好还能拖窗口。 -->
+  <img class="applogo" src="icon-ui.png" alt="" title="Claude Code 会话看板">
   <span class="tabs no-drag">
     <button class="tab on" id="tabBoard" title="并发会话列表：谁在等你、该切到哪个会话去">会话看板</button>
     <button class="tab" id="tabArchive" title="按月看哪天报过哪些会话，并从这里发起当日上报（读 NAS；上报本身走 cc-session-nas-upload skill）">上报日历</button>
@@ -704,7 +768,7 @@
   <span class="offhint" id="offhint"></span>
   <span class="grow"></span>
   <span class="sorthint" id="sorthint"></span>
-  <button id="btnSettings" title="置顶 / 响铃 / 通知 / 显示已隐藏 / 开机自启 / 批量收起 / 用量显示设置">⚙ 设置</button>
+  <button id="btnSettings" title="置顶 / 最小化到托盘 / 响铃 / 通知 / 显示全部 / 开机自启 / 自动删除残留记录 / 用量显示设置">⚙ 设置</button>
   <button id="btnHelp">?</button>
 </div>
 <div class="health" id="health"></div>
@@ -730,7 +794,9 @@
      不另开 BrowserWindow —— 那会在任务栏多占一个条目，而这是偶尔看一眼的东西。 -->
 <div id="arPanel" hidden>
   <div class="arbar">
-    <span class="t">上报归档</span>
+    <!-- 这里原来有个「上报归档」标题。删掉的理由：视图名已经由高亮的 tab 说了，
+         而且它和 tab 上的字（「上报日历」）不是同一个词，同一个视图两个名字；
+         会话看板那个视图也没有这种面板内标题，留着它两个 tab 的结构就不一样。 -->
     <label class="arhint">我的账号
       <span class="arcombo">
         <input id="arUser" placeholder="域账号" spellcheck="false" autocomplete="off" />
@@ -755,15 +821,25 @@
   </div>
 </div>
 
-<!-- 设置：整页视图，不进 tab（tab 表示「在浏览哪个内容」，配置界面不是内容）。 -->
-<div id="stPanel" hidden>
-  <div class="sthead"><div class="inner"><span>设置</span><span class="grow"></span><button id="stClose">完成</button></div></div>
-  <div class="stbody">
+<!-- 设置：看板内的弹窗，复用 .mask + .sheet（与帮助面板、两个对话框同一套）。
+     不进 tab —— tab 表示「在浏览哪个内容」，配置界面不是内容；
+     也不另开 OS 窗口 —— 那会在任务栏多占一条，而这是改完就走的地方。 -->
+<div class="mask" id="stMask">
+  <div class="sheet settings">
+    <header>
+      <h2>设置</h2>
+      <button class="x" id="stClose" title="关闭（Esc）">✕</button>
+    </header>
+  <div class="body stbody">
     <section class="stsec">
       <div class="stgroup">窗口</div>
       <div class="strow">
         <div class="stmain"><div class="sttitle">窗口置顶</div></div>
         <div class="stctl"><span class="stsw"><input type="checkbox" id="stTop"><span class="track"></span><span class="knob"></span></span></div>
+      </div>
+      <div class="strow">
+        <div class="stmain"><div class="sttitle">最小化到托盘</div><div class="stdesc">最小化时收进托盘，不在任务栏留一格；点托盘图标回来</div></div>
+        <div class="stctl"><span class="stsw"><input type="checkbox" id="stTray"><span class="track"></span><span class="knob"></span></span></div>
       </div>
       <div class="strow">
         <div class="stmain"><div class="sttitle">开机自启</div></div>
@@ -791,11 +867,11 @@
         <div class="stmain"><div class="sttitle">开启提醒</div><div class="stdesc">到点提醒你上报当天的会话；当天已经报过就不再提醒</div></div>
         <div class="stctl"><span class="stsw"><input type="checkbox" id="stRemind"><span class="track"></span><span class="knob"></span></span></div>
       </div>
-      <div class="strow">
+      <div class="strow" id="stRowTimes">
         <div class="stmain"><div class="sttitle">提醒时间</div><div class="stdesc"><span id="stTimes"></span></div></div>
         <div class="stctl"><button id="stTimesBtn">修改…</button></div>
       </div>
-      <div class="strow">
+      <div class="strow" id="stRowNasUser">
         <div class="stmain"><div class="sttitle">我的域账号</div><div class="stdesc">核对「今天报过没」用的就是这个账号，填错会一直提醒</div></div>
         <div class="stctl"><input class="sttext" id="stNasUser" placeholder="域账号" spellcheck="false" autocomplete="off"></div>
       </div>
@@ -803,23 +879,23 @@
     <section class="stsec">
       <div class="stgroup">列表</div>
       <div class="strow">
-        <div class="stmain"><div class="sttitle">显示已隐藏 / 久候 / 已关闭</div><div class="stdesc">默认收起来，勾上后它们回到列表里</div></div>
+        <div class="stmain"><div class="sttitle">显示全部</div><div class="stdesc">默认不显示已隐藏 / 久候 / 已关闭这三类，勾上后它们回到列表里</div></div>
         <div class="stctl"><span class="stsw"><input type="checkbox" id="stFolded"><span class="track"></span><span class="knob"></span></span></div>
-      </div>
-      <div class="strow">
-        <div class="stmain"><div class="sttitle">批量收起</div><div class="stdesc">把已完成 / 久候 / 已关闭的记一条「不想再看见」，不删数据</div></div>
-        <div class="stctl"><button id="stCollapse">收起来</button></div>
       </div>
     </section>
     <section class="stsec">
       <div class="stgroup">自动删除残留记录</div>
+      <!-- 档位与自定义合成一行：它们是同一个设置的两种填法，拆成两行会让人以为
+           是两条独立规则。自定义那截只在选中「自定义」时出现（渐进展开）。 -->
       <div class="strow">
         <div class="stmain"><div class="sttitle">保留多久</div><div class="stdesc">会话没了、注册表也没了、只剩观测记录时，过这么久自动删掉</div></div>
-        <div class="stctl"><span class="stseg" id="stPurge"></span></div>
-      </div>
-      <div class="strow">
-        <div class="stmain"><div class="sttitle">自定义时长</div><div class="stdesc">任意时长，范围 1 小时 ~ 365 天</div></div>
-        <div class="stctl"><input class="stnum" id="stPurgeNum" type="number" min="1" max="8760" step="1"><span class="stdesc">小时</span><button id="stPurgeSet">应用</button></div>
+        <div class="stctl col">
+          <span class="stseg" id="stPurge"></span>
+          <div class="stsub" id="stPurgeCustom" hidden>
+            <input class="stnum" id="stPurgeNum" type="number" min="1" max="8760" step="1"
+                   title="范围 1 小时 ~ 365 天，超出会自动收到边界"><span class="stdesc">小时</span><button id="stPurgeSet">应用</button>
+          </div>
+        </div>
       </div>
     </section>
     <section class="stsec">
@@ -829,6 +905,7 @@
         <div class="stctl"><button id="stHud">设置…</button></div>
       </div>
     </section>
+  </div>
   </div>
 </div>
 
@@ -893,32 +970,33 @@
 <div class="mask" id="remindMask">
   <div class="sheet narrow">
     <header>
-      <h2>上报提醒</h2>
+      <h2>提醒时间</h2>
       <span class="sub">到点提醒你上报当天的会话</span>
       <button class="x" id="remindX" title="取消（Esc）">✕</button>
     </header>
     <div class="form">
-      <label class="chk"><input type="checkbox" id="remindOn"><span>开启上报提醒</span></label>
+      <!-- 开关不在这里了 —— 它住在 ⚙ 设置的「开启提醒」那一行。
+           同一个开关放两处，迟早出现"两边不一致该信谁"。 -->
       <!-- 把行为如实写出来。第二句尤其重要：不写的话，在家没挂 VPN 的晚上
            被连敲几次会被当成 bug，而它是明说过的取舍 -->
       <p class="lead">到点先去 NAS 上核对今天有没有上报记录，<b>报过就不提醒</b>。
         核对不上时（NAS 读不到 / 域账号没设或填错）仍然提醒，并在通知里注明没核对上 ——
         宁可多敲你一次，也好过一个看着开着、其实不响的开关。</p>
-      <div id="remindBody">
-        <div class="hgrid" id="remindGrid"></div>
-        <div class="frow" style="margin-top:10px">
-          <span class="lead" style="flex:none">另加</span>
-          <input id="remindExtra" class="wide" spellcheck="false" autocomplete="off"
-                 placeholder="非整点，如 12:30, 17:45">
-        </div>
+      <!-- 选时 + 选分 + 确认添加。每次增删都**立刻落盘**，所以没有「确定 / 取消」 -->
+      <div class="frow">
+        <span class="lead" style="flex:none">添加时间</span>
+        <select id="remindHour"></select>
+        <span class="lead" style="flex:none">:</span>
+        <select id="remindMin"></select>
+        <button id="remindAdd" class="primary">确认添加</button>
       </div>
+      <div id="remindList" class="rmlist"></div>
       <p class="cur" id="remindCur"></p>
       <p class="err" id="remindErr"></p>
       <div class="btns">
         <button id="remindReset" style="flex:none">恢复默认</button>
         <span class="grow"></span>
-        <button id="remindCancel">取消</button>
-        <button id="remindOk" class="primary">确定</button>
+        <button id="remindCancel">完成</button>
       </div>
     </div>
   </div>
@@ -1452,7 +1530,7 @@ tb.addEventListener('contextmenu', (e) => {
 
 // ---- 顶部控件 ----
 //
-// 5 个开关 + 批量收起都搬进了 ⚙ 的原生菜单：它们全是"设一次就不动"的东西，
+// 5 个开关都搬进了 ⚙ 的原生菜单：它们全是"设一次就不动"的东西，
 // 常驻顶栏要占掉一整行（约 40px），而那一行本该归列表。
 // 用原生 checkbox 菜单项，一打开就能看见勾选状态 —— 收起来并不丢信息。
 // 留在外面的只有排序（改动频率明显更高）和帮助。
@@ -1461,7 +1539,7 @@ tb.addEventListener('contextmenu', (e) => {
 // 开自绘面板而不是原生菜单。原生菜单那条链路（showSettingsMenu / board:settingsMenu）
 // **刻意保留不删** —— 面板万一有问题，把这一行改回去就恢复原状。
 document.getElementById('btnSettings').addEventListener('click', () => {
-  if (stQ('stPanel').hidden) stOpen(); else stClose()
+  if (stShown()) stClose(); else stOpen()
 })
 // 上报走独立窗口：它要碰 NAS（SMB），而主窗口每 1.5 秒刷新一次，
 // 两者放一起迟早有人把 NAS 读进刷新循环
@@ -1768,26 +1846,45 @@ let stCur = {}
 const ST_THEMES = [['auto', '跟随系统'], ['light', '浅色'], ['dark', '深色']]
 // 与主进程的 PURGE_PRESETS 一致；0 = 关闭。这里只是呈现，校验与夹取仍在
 // applySetting 里做（两个入口共用一处规则）。
-const ST_PURGE = [[0, '关闭'], [6, '6 小时'], [24, '1 天'], [72, '3 天'], [168, '7 天']]
+// 最后一档是「自定义」：加上它之后**永远恰好有一档亮着**。
+// 之前没有这一档，值不在档位里（比如 5 小时）时一档都不亮 —— 那是为了不谎报
+// 当前规则，但代价是"到底按什么规则删"界面上没有任何一处直说。
+const ST_PURGE = [[0, '关闭'], [6, '6 小时'], [24, '1 天'], [72, '3 天'], [168, '7 天'], ['custom', '自定义']]
+// 「自定义」那截输入框是否展开。两种情况展开：你点了「自定义」，
+// 或者当前值本来就不在档位里。点了档位、或自定义值刚好等于某个档位 -> 收起。
+let stPurgeOpen = false
 
+// 分段控件：**只在档位表变化时重建**，平时只挪 .on。
+// 原先每次调用都 replaceChildren，而 stSync 挂在 1.5 秒一次的数据推送上 ——
+// 重建一旦落在你按下与松开之间，mousedown 和 mouseup 就发生在两个不同的
+// 按钮对象上，click 事件根本不成立，表现为"点了没反应"。因为要撞上刷新
+// 时机才复现，它是偶发的，比全坏更难查。
+// onPick 存在宿主上而不是闭包进监听器：这样按钮只建一次，回调却始终是最新那个。
 function stSeg(host, items, cur, onPick) {
-  host.replaceChildren()
-  for (const [val, label] of items) {
-    const b = document.createElement('button')
-    b.textContent = label
-    if (String(val) === String(cur)) b.className = 'on'
-    b.addEventListener('click', () => onPick(val))
-    host.append(b)
+  host.__onPick = onPick
+  const sig = items.map(([v]) => v).join(',')
+  if (host.dataset.sig !== sig) {
+    host.dataset.sig = sig
+    host.replaceChildren()
+    for (const [val, label] of items) {
+      const b = document.createElement('button')
+      b.textContent = label
+      b.dataset.val = String(val)
+      b.addEventListener('click', () => host.__onPick(val))
+      host.append(b)
+    }
   }
+  for (const b of host.children) b.classList.toggle('on', b.dataset.val === String(cur))
 }
 
 // 把 settings 回填到控件上。**跳过正在编辑的输入框** —— 每帧都回填的话，
 // 你打字打到一半就会被推送的旧值按回去（实测这类 bug 极难自查）。
 function stSync(s) {
   stCur = s || {}
-  if (stQ('stPanel').hidden) return
+  if (!stShown()) return
   const ck = (id, v) => { const e = stQ(id); if (e) e.checked = !!v }
   ck('stTop', stCur.alwaysOnTop)
+  ck('stTray', stCur.trayOnMinimize)
   ck('stLaunch', stCur.autoLaunch)
   ck('stSound', stCur.sound)
   ck('stNotify', stCur.notify)
@@ -1801,53 +1898,104 @@ function stSync(s) {
     stQ('stNasUser').value = String(stCur.nasUser || '')
   }
   stSeg(stQ('stTheme'), ST_THEMES, stCur.theme || 'auto',
-    (v) => window.board.setSetting('theme', v))
+    (v) => { stCur.theme = v; window.board.setSetting('theme', v) })
   const ph = Number(stCur.autoPurgeHours) || 0
-  // 自定义值不在档位里时不选中任何档 —— 硬选一个会谎报当前规则
-  stSeg(stQ('stPurge'), ST_PURGE, ST_PURGE.some(([h]) => h === ph) ? ph : '',
-    (v) => window.board.setSetting('autoPurgeHours', v))
+  // 值落在档位里就选中那一档；否则它本来就是自定义值，选中「自定义」并展开输入框。
+  // 判 typeof number 是因为档位表里混了一个 'custom' 字符串。
+  const isPreset = ST_PURGE.some(([h]) => typeof h === 'number' && h === ph)
+  const openCustom = stPurgeOpen || !isPreset
+  stSeg(stQ('stPurge'), ST_PURGE, openCustom ? 'custom' : ph, (v) => {
+    if (v === 'custom') {
+      // 点「自定义」只是展开输入框，**不改设置** —— 改在点「应用」时发生。
+      // 输入框预填当前值，让你在现有基础上改，而不是对着空框想一个数。
+      stPurgeOpen = true
+      stSync(stCur)
+      stQ('stPurgeNum').focus()
+      stQ('stPurgeNum').select()
+      return
+    }
+    stPurgeOpen = false
+    stCur.autoPurgeHours = v
+    window.board.setSetting('autoPurgeHours', v)
+  })
+  stQ('stPurgeCustom').hidden = !openCustom
   if (document.activeElement !== stQ('stPurgeNum')) stQ('stPurgeNum').value = ph || ''
+
+  // 上报提醒关掉时，藏起只对提醒成立的两行 —— 摆着一组点了没用的控件，
+  // 比不摆更让人怀疑"是不是坏了"。
+  // 域账号也一起藏：它虽然归档面板也在用，但那边工具栏有自己的输入口（arUser，
+  // 写的是同一个 nasUser），所以藏在这里不会让它变得够不着。
+  const remindOn = !!stCur.uploadRemind
+  stQ('stRowTimes').hidden = !remindOn
+  stQ('stRowNasUser').hidden = !remindOn
 }
 
+// 弹窗开合。用 .mask 的 .on，与帮助面板/两个对话框同一套 ——
+// 背后的列表和归档不动，关掉就回到你原来在看的东西，不用再"切回去"。
+const stShown = () => stQ('stMask').classList.contains('on')
 function stOpen() {
-  // 整页展开：让出列表/详情/归档（由 body.settings-on 的 CSS 负责），
-  // 归档面板自己的 hidden 属性不动 —— 关掉设置就自动回到你原来那个视图。
-  document.body.classList.add('settings-on')
-  stQ('stPanel').hidden = false
+  stQ('stMask').classList.add('on')
+  // 每次打开都回到顶部。弹窗是常驻 DOM，不重置的话会停在上次滚到的地方 ——
+  // 下次打开直接落在「自动删除」那一段，看着像少了前面几组设置。
+  const body = stQ('stMask').querySelector('.stbody')
+  if (body) body.scrollTop = 0
   stSync(stCur)
 }
-function stClose() {
-  document.body.classList.remove('settings-on')
-  stQ('stPanel').hidden = true
-}
+function stClose() { stQ('stMask').classList.remove('on') }
 
 stQ('stClose').addEventListener('click', stClose)
+stQ('stMask').addEventListener('click', (e) => { if (e.target === stQ('stMask')) stClose() })
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !stQ('stPanel').hidden) { stClose(); e.stopPropagation() }
+  if (e.key === 'Escape' && stShown()) { stClose(); e.stopPropagation() }
 }, true)
 
 // 开关类：改完**不关面板** —— 这正是自绘的理由
-for (const [id, key] of [['stTop', 'alwaysOnTop'], ['stLaunch', 'autoLaunch'],
+for (const [id, key] of [['stTop', 'alwaysOnTop'], ['stTray', 'trayOnMinimize'], ['stLaunch', 'autoLaunch'],
   ['stSound', 'sound'], ['stNotify', 'notify'],
   ['stRemind', 'uploadRemind'], ['stFolded', 'showFolded']]) {
-  stQ(id).addEventListener('change', () => window.board.setSetting(key, stQ(id).checked))
+  stQ(id).addEventListener('change', () => {
+    const v = stQ(id).checked
+    // 本地先记一份再送出去。settings 每 1.5 秒推一次，主进程把新值写回来之前
+    // 若正好来一帧，stSync 会拿旧值把开关按回去 —— 看着像"自己弹回去了"。
+    stCur[key] = v
+    window.board.setSetting(key, v)
+  })
 }
 
-stQ('stCollapse').addEventListener('click', () => window.board.clearStale())
+// 这里原本还有一个「批量隐藏」按钮，已删除。删的理由记在这，免得又被加回来：
+// 它声称能收「已完成 / 久候 / 已关闭」三类，但后两类**看板默认就已经折叠掉了**
+// （visible 的过滤条件里 idle / closed / hidden 是同一组），给它们打隐藏墓碑
+// 在列表、排序、计数上都是零变化；已隐藏的更无从下手。唯一有效果的只有
+// 「已完成」，而那是"球在你手上"的待办，不该被一键清掉。
+// 于是它没有合法目标 —— 逐条右键 / Delete 已经够用。
 stQ('stHud').addEventListener('click', () => window.board.openHudGuide())
 stQ('stTimesBtn').addEventListener('click', () => window.board.askRemindTimes && window.board.askRemindTimes())
 stQ('stPurgeSet').addEventListener('click', () => {
   const n = Math.round(Number(stQ('stPurgeNum').value) || 0)
   // 只送原始值，夹取与校验交给 applySetting —— 页面再抄一份规则必然漂移
-  if (n > 0) window.board.setSetting('autoPurgeHours', n)
+  if (n <= 0) return
+  // 交回给"值本身"决定展不展开：填了 5 小时（不在档位里）仍展开且「自定义」亮着；
+  // 填了 24（等于「1 天」）就收起、亮「1 天」—— 那两个说的是同一条规则，
+  // 没理由因为你从哪个入口填的而显示成两种样子。
+  stPurgeOpen = false
+  stCur.autoPurgeHours = n
+  window.board.setSetting('autoPurgeHours', n)
+})
+// 回车等于点「应用」。输进去不生效、还得再找按钮，是这类输入框最常见的卡点。
+stQ('stPurgeNum').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); stQ('stPurgeSet').click() }
 })
 // 域账号：change（失焦/回车）才提交，不在打字过程中每个字母都写盘
 stQ('stNasUser').addEventListener('change', async () => {
   const v = stQ('stNasUser').value.trim()
   stQ('stNasUser').value = v
   await window.upload.setUser(v)
-  // 归档面板下次打开会用新账号；已经开着就立刻重读
-  if (!arQ('arPanel').hidden) { arCurUser = v; arLoadDates() }
+  // 归档面板下次打开会用新账号；已经开着就立刻重读。
+  // **输入框的值也必须一起改** —— 只改 arCurUser + 重载数据的话，归档那个
+  // 输入框还显示旧账号，而它下面的日历已经是新账号的数据了：同一个界面上
+  // 两处自相矛盾，而且看着像"改了没生效"（实测过 setting=probe-b、
+  // 输入框仍是 probe-a）。
+  if (!arQ('arPanel').hidden) { arCurUser = v; arQ('arUser').value = v; arLoadDates() }
 })
 
 let arLoaded = false
@@ -1952,115 +2100,108 @@ window.board && window.board.onAskPurgeThreshold(openPurge)
 
 // ---- 上报提醒：时间选择对话框 ----
 //
-// 设置菜单点「上报提醒…」由主进程发消息过来。整点走九宫格（一眼扫完），
-// 非整点走那个输入框 —— 两者最后拼成一个串交给主进程。
+// 设置里点「提醒时间 · 修改…」由主进程发消息过来。
 //
-// **这里不判时间格式**：格式的权威只有 upload-core.parseTimes 一处，页面把原始
-// 输入整个送过去，看不懂的条目由它回报（{ok:false, dropped}），这里只负责显示。
-// 两边各写一套正则的话，迟早出现"对话框收下了、落盘时被悄悄丢掉"。
+// 交互：选时 + 选分 + 「确认添加」，每次增删**立刻落盘** —— 所以这个对话框
+// 没有「确定 / 取消」，关掉就是关掉。原先是"九宫格选整点 + 输入框写非整点，
+// 最后一起提交"：整点和非整点分居两处，看不出最终会在哪几个点被叫，
+// 还得自己把两处并起来想。
+//
+// **这里不判时间格式、不排序、不去重**：那三件都归 upload-core.parseTimes，
+// 页面把列表原样送过去，并以它返回的 times 为准。两边各写一套的话，
+// 迟早出现"对话框收下了、落盘时被悄悄丢掉"。
 const remindMask = document.getElementById('remindMask')
-const remindOn = document.getElementById('remindOn')
-const remindGrid = document.getElementById('remindGrid')
-const remindExtra = document.getElementById('remindExtra')
+const remindHourSel = document.getElementById('remindHour')
+const remindMinSel = document.getElementById('remindMin')
+const remindListEl = document.getElementById('remindList')
 const remindCur = document.getElementById('remindCur')
 const remindErr = document.getElementById('remindErr')
-const remindBody = document.getElementById('remindBody')
-// 整点选中集合（'00'..'23'）。非整点不进这里，它们只活在输入框里
-const remindHours = new Set()
+// 当前已保存的时间列表，始终是主进程解析后的口径
+let remindTimes = []
 let remindDefaults = []
 let remindNasUser = ''
 
-// 九宫格建一次就够，之后只切 .on
+// 两个下拉建一次。分钟给满 0~59 而不是 5 分钟步进 —— 原来那个输入框支持
+// 任意分钟，换成步进就是功能倒退。
 for (let h = 0; h < 24; h++) {
   const hh = String(h).padStart(2, '0')
-  const b = el('button', null, hh)
-  b.type = 'button'
-  b.dataset.h = hh
-  b.addEventListener('click', () => {
-    if (remindHours.has(hh)) remindHours.delete(hh); else remindHours.add(hh)
-    b.classList.toggle('on', remindHours.has(hh))
-    remindErr.textContent = ''
-    echoRemind()
-  })
-  remindGrid.append(b)
+  const o = el('option', null, hh)
+  o.value = hh
+  remindHourSel.append(o)
+}
+for (let m = 0; m < 60; m++) {
+  const mm = String(m).padStart(2, '0')
+  const o = el('option', null, mm)
+  o.value = mm
+  remindMinSel.append(o)
 }
 
-// 把待保存的结果回显出来。**必须有**：整点在格子里、非整点在输入框里，
-// 两处分开看不出"最终会在哪几个点被叫"，而那正是你要确认的东西。
-function echoRemind() {
-  const picked = [...remindHours].sort().map((h) => h + ':00')
-  const extra = remindExtra.value.trim()
-  remindCur.textContent = ''
-  const label = picked.concat(extra ? [extra] : []).join(' ')
-  if (!label) {
-    remindCur.appendChild(document.createTextNode('没选时间 —— '))
-    remindCur.appendChild(el('b', null, '不会提醒'))
+function renderRemindList() {
+  remindListEl.replaceChildren()
+  if (!remindTimes.length) {
+    remindListEl.append(el('div', 'rmempty', '还没有提醒时间 —— 不会提醒'))
   } else {
-    remindCur.appendChild(document.createTextNode('提醒时间：'))
-    remindCur.appendChild(el('b', null, label))
+    for (const t of remindTimes) {
+      const row = el('div', 'rmitem')
+      row.append(el('b', null, t), el('span', 'grow'))
+      const x = el('button', null, '✕')
+      x.type = 'button'
+      x.title = '删除 ' + t
+      x.addEventListener('click', () => saveRemindTimes(remindTimes.filter((v) => v !== t)))
+      row.append(x)
+      remindListEl.append(row)
+    }
   }
   // 域账号没设过时，"报过就不提醒"这一半是失效的（核对不了），得说出来。
-  // 不说的话表现是"我明明报了它还叫"，根因在另一个窗口里，基本查不到。
+  // 不说的话表现是"我明明报了它还叫"，根因在另一个界面里，基本查不到。
+  remindCur.replaceChildren()
   if (!remindNasUser) {
-    remindCur.appendChild(el('div', 'lead',
+    remindCur.append(el('div', 'lead',
       '还没设域账号，核对不了"今天报没报" —— 每次都会提醒。'
-      + '去「↥ 上报日历」窗口左上角确认一次账号即可。'))
+      + '在 ⚙ 设置 →「我的域账号」或「上报日历」左上角填一次即可。'))
   }
-  remindBody.classList.toggle('dim', !remindOn.checked)
+}
+
+// 落盘并以主进程返回的列表为准（它会排序去重）
+async function saveRemindTimes(next) {
+  // on 原样带回去：开关已经搬到设置页，这个对话框不该动它
+  const res = await window.board.setRemind(!!stCur.uploadRemind, next.join(','))
+  if (!res || res.ok !== true) {
+    remindErr.textContent = '这几个填法看不懂：' + ((res && res.dropped) || []).join('、')
+    return false
+  }
+  remindErr.textContent = ''
+  remindTimes = Array.isArray(res.times) ? res.times : next
+  renderRemindList()
+  return true
 }
 
 function openRemind(payload) {
   const p = payload || {}
   remindDefaults = Array.isArray(p.defaults) ? p.defaults : []
   remindNasUser = String(p.nasUser || '')
-  fillRemind(!!p.on, Array.isArray(p.times) ? p.times : [])
+  remindTimes = Array.isArray(p.times) ? p.times.slice() : []
   remindErr.textContent = ''
+  // 下拉停在当前小时、00 分：多数情况下要么直接用，要么就近调一下
+  remindHourSel.value = String(new Date().getHours()).padStart(2, '0')
+  remindMinSel.value = '00'
+  renderRemindList()
   remindMask.classList.add('on')
-}
-
-// 把一组时间铺进界面：整点落格子，非整点落输入框。
-// 分流判据是"分钟位是不是 00"，不是"在不在默认档里" —— 后者会把你自己选的
-// 22:00 挤到输入框里去。
-function fillRemind(on, times) {
-  remindOn.checked = !!on
-  remindHours.clear()
-  const extra = []
-  for (const t of times) {
-    const m = /^(\d{2}):(\d{2})$/.exec(String(t))
-    if (m && m[2] === '00') remindHours.add(m[1])
-    else extra.push(t)
-  }
-  for (const b of remindGrid.children) b.classList.toggle('on', remindHours.has(b.dataset.h))
-  remindExtra.value = extra.join(', ')
-  echoRemind()
 }
 
 function closeRemind() { remindMask.classList.remove('on') }
 
-async function commitRemind() {
-  // 拼成一个串交给主进程去解析：分隔符规则也归 parseTimes 管，
-  // 页面连"逗号怎么切"都不该自己决定
-  const raw = [...remindHours].sort().map((h) => h + ':00').join(',') + ',' + remindExtra.value
-  const res = await window.board.setRemind(remindOn.checked, raw)
-  if (!res || res.ok !== true) {
-    remindErr.textContent = '这几个填法看不懂：' + ((res && res.dropped) || []).join('、')
-      + '（要 HH:MM，如 21:30）'
-    return
-  }
-  closeRemind()
-}
-
-remindOn.addEventListener('change', echoRemind)
-remindExtra.addEventListener('input', () => { remindErr.textContent = ''; echoRemind() })
-remindExtra.addEventListener('keydown', (e) => { if (e.key === 'Enter') commitRemind() })
-document.getElementById('remindOk').addEventListener('click', commitRemind)
+document.getElementById('remindAdd').addEventListener('click', () => {
+  const t = remindHourSel.value + ':' + remindMinSel.value
+  // 重复添加不当错误处理，只说一声 —— parseTimes 那边也会去重，
+  // 但不说的话你会以为"点了没反应"
+  if (remindTimes.includes(t)) { remindErr.textContent = t + ' 已经在列表里了'; return }
+  saveRemindTimes(remindTimes.concat([t]))
+})
 document.getElementById('remindCancel').addEventListener('click', closeRemind)
 document.getElementById('remindX').addEventListener('click', closeRemind)
-// 只把表单恢复成默认，不直接落盘 —— 点了还能反悔，与「取消」是一对
-document.getElementById('remindReset').addEventListener('click', () => {
-  fillRemind(true, remindDefaults)
-  remindErr.textContent = ''
-})
+// 「恢复默认」现在也**立刻生效** —— 这个对话框没有「取消」可反悔了
+document.getElementById('remindReset').addEventListener('click', () => saveRemindTimes(remindDefaults))
 remindMask.addEventListener('mousedown', (e) => { if (e.target === remindMask) closeRemind() })
 window.board && window.board.onAskRemindTimes(openRemind)
 // ---- 帮助面板 ----
@@ -2115,41 +2256,59 @@ async function buildHelp() {
   let legend = []
   try { legend = await window.board.statusLegend() } catch (_) { legend = [] }
 
-  const st = section('状态 · 按「有多需要你」从上到下排，这也是默认排序的顺序')
+  // 写给**没耐心的人**：一行一条，只留"影响你怎么操作"的信息。
+  // 设计理由、边界条件、为什么这么做 —— 一律不进这里。那些是我的账，不是你的。
+  // 上一版每条都带因果从句，滚下来 4.9 屏全是字，等于没写。
+  // 别在这句里写"最上面那条最该处理" —— 默认排法是**启动顺序**，
+  // 最上面那条是最早开的，不是最急的。要那个效果得点「状态」列。
+  helpBody.appendChild(el('p', 'lead',
+    '同时开着好几个 Claude Code 会话时，告诉你现在该切到哪个去。'
+    + '列表默认按启动顺序排；想让最急的排最上面，点一下「状态」列。'))
+
+  const cap = section('能做什么')
+  row(cap, '谁在等你', '所有会话的状态一列看全')
+  row(cap, '一键切过去', '双击一行，跳到那个会话的窗口')
+  row(cap, '上下文余量', '谁快撑满了，一眼看见')
+  row(cap, '账号额度', '5 小时窗 / 周窗的用量和重置倒计时')
+  row(cap, '到点叫你', '跑完 / 等你时响铃、系统通知、任务栏闪')
+  row(cap, '最近一轮对话', '选中一行，看你说的和它回的最后一句')
+  row(cap, '上报日历', '按月看哪天报过哪些会话')
+  row(cap, '上报提醒', '到点提醒；当天报过就不打扰')
+
+  // 边界压成一句话。上一版拆成 4 行表格，把"顺带说明"写成了正文体量。
+  helpBody.appendChild(el('p', 'lead',
+    '它只观测：不代你回复、不代你授权，也不改 Claude Code 的行为。'
+    + '除了看上报日历时读共享盘，不联网、不读任何凭据。关掉看板，会话照跑。'))
+
+  const st = section('状态')
   for (const s of legend) legendRow(st, s)
 
-  const so = section('排序 · 点表头')
-  row(so, '点一次 / 两次 / 三次', '升序 → 降序 → 恢复默认（启动顺序）。当前排法显示在右上角')
-  row(so, '点「状态」列', '就是原来的「需求度」排法：在问你 → 等你输入 → 已完成 → 运行中 …')
-  row(so, '点「上下文」列', '找出谁快撑满了（默认降序）')
-  row(so, '点「静默」列', '找出谁最久没产出 —— 一个"运行中"却静默很久的会话通常是卡住了')
-  row(so, '默认排法', '启动顺序（早的在前）；启动时刻未知的排最后，不抢第一行')
-  row(so, '沉底规则', '非默认排法下，久候 / 已关闭 / 已隐藏一律沉底，'
-    + '否则昨天的死会话会仅因"启动得早"或"静默最久"插到第一行')
-  row(so, '列宽', '拖表头之间的分隔处即可调整，会记住')
+  const so = section('排序')
+  row(so, '默认', '启动顺序，早开的在前')
+  row(so, '点表头', '升序 → 降序 → 恢复默认')
+  row(so, '点「状态」列', '按"有多需要你"排：在问你 → 等你输入 → 已完成 → …')
+  row(so, '点「静默」列', '找卡住的：显示"运行中"却很久没产出')
+  row(so, '拖表头分隔处', '调列宽，会记住')
 
   const op = section('操作')
-  row(op, '双击行', '在文件管理器打开该会话的工作目录')
-  row(op, '右键', '菜单：隐藏 or 取消隐藏 / 删除记录 / 复制路径 / 打开目录')
-  const del = row(op, '', '隐藏这一条 —— 不等于关会话。在 ⚙ 设置里勾「显示已隐藏」可找回，'
-    + '而且该会话下次有动静会自己回到列表。在已隐藏的行上再按一次 = 取消隐藏')
+  row(op, '双击行', '切到该会话的窗口')
+  row(op, '右键', '隐藏 / 删除记录 / 复制路径 / 打开目录')
+  const del = row(op, '', '隐藏这一条。不等于关会话，它下次有动静会自己回来')
   del.firstChild.appendChild(el('kbd', null, 'Delete'))
   const esc = row(op, '', '取消选择 / 关闭本面板')
   esc.firstChild.appendChild(el('kbd', null, 'Esc'))
-  row(op, '删除记录', '和隐藏是两件事：隐藏留着数据、还能找回；删除是把这条观测记录真的删掉，'
-    + '不可撤销。只在「残留记录」上出现 —— 会话早没了、Claude Code 也不再登记它，'
-    + '只剩看板这边一条记录没人清（强杀 / 直接关终端不会触发结束事件）。'
-    + '别的行删不掉，所以菜单里根本不给这一项')
-  row(op, '自动删除残留记录', '⚙ 设置里选常用档（关闭 / 6 小时 / 1 天 / 3 天 / 7 天），'
-    + '或点「自定义…」按小时 / 天填任意时长（1 小时 ~ 365 天）。默认 3 天。'
-    + '它跟着刷新走（约每 1.5 秒一次），所以看板关着的时候不清理 —— '
-    + '下次打开的第一帧会把欠的一次性补上')
-  row(op, '⚙ 设置', '置顶 / 响铃 / 通知 / 显示已隐藏 / 开机自启 / 批量收起 / 自动删除残留记录，'
-    + '以及「用量显示设置（5h / 周）」—— 顶部额度柱子的开启引导，随时能再打开')
+  row(op, '删除记录', '真删，不可撤销。只对"会话早没了、只剩一条记录"的残留行开放')
 
-  helpBody.appendChild(el('h3', null, '柱子怎么读 · 上下文列与顶部额度共用同一套'))
+  const up = section('上报')
+  row(up, '看哪天报过', '顶部「上报日历」标签页，点某天看那天报了哪些')
+  row(up, '我的域账号', '共享盘上每人一个目录，先确认自己是谁；填错会天天提醒你')
+  row(up, '怎么上报', '点「↥ 上报当日…」开一个 Claude 窗口，在里面对话完成')
+  row(up, '连不上共享盘', '会给挂载引导。密码只能你自己填，看板不读不存')
+  row(up, '改提醒时间', '⚙ 设置 →「提醒时间 · 修改…」')
+
+  helpBody.appendChild(el('h3', null, '柱子怎么读'))
   helpBody.appendChild(el('p', 'lead',
-    '百分比数字压在柱子里，颜色按占用高低分 ' + METER_TIERS.length + ' 档（越靠满格切得越细）：'))
+    '上下文列和顶部额度共用一套：数字压在柱子里，颜色按占用高低分 ' + METER_TIERS.length + ' 档。'))
 
   // 图例直接渲染真的柱子组件：说明和实物不可能对不上。
   //
@@ -2182,15 +2341,15 @@ async function buildHelp() {
   const bar = el('table')
   helpBody.appendChild(bar)
   row(bar, '斜纹底 + —', '拿不到数据，不是 0%')
-  row(bar, '虚线描边', '快照可能偏旧、会低报（只对正在跑的会话判定；空闲会话上下文不变，旧值就是真相）')
+  row(bar, '虚线描边', '快照可能偏旧，会低报')
   row(bar, '余 xx', '顶部额度：距该窗口重置还剩多久')
-  row(bar, '~ 前缀', '上下文由 transcript 估算（未装 claude-hud 时的兜底），刻度可能有偏差')
+  row(bar, '~ 前缀', '估算值，刻度可能有偏差')
 
-  const src = section('数据来源 · 带 ✓ / ⚠ 的是当前实际生效的路径')
+  const src = section('数据来源')
   src.className = 'src'
-  row(src, '会话清单 / 死活 / 忙闲', '← Claude Code 的活会话注册表 sessions/<pid>.json')
-  row(src, '等你多久 / 本轮用时 / 摘要 / 标题', '← 本看板的 hook 记录')
-  row(src, '心跳 / 静默', '← 该会话 transcript 文件的修改时间')
+  row(src, '会话清单 / 死活 / 忙闲', '← Claude Code 的活会话注册表')
+  row(src, '等你多久 / 本轮用时 / 摘要', '← 本看板的 hook 记录')
+  row(src, '心跳 / 静默', '← transcript 文件的修改时间')
   const ctxRow = row(src, '上下文占用', '')
   const usageRow = row(src, '5h / 周用量', '')
   liveCells.ctx = ctxRow.lastChild
@@ -2372,7 +2531,7 @@ let settingsApplied = false
 const offhint = document.getElementById('offhint')
 
 window.board.onRows(({ rows, stats, settings }) => {
-  // 面板开着时用最新值回填（跳过正在编辑的输入框，见 stSync）
+  // 面板开着时用最新值回填（跳过正在编辑的输入框，见 stSync）。
   stSync(settings)
   // 首帧才应用持久化的排序与列宽：之后这两个由用户交互驱动，
   // 每帧都套一遍会把正在拖的列宽按回旧值。
@@ -2419,14 +2578,25 @@ window.board.onRows(({ rows, stats, settings }) => {
   s += stats.needYou > 0
     ? '<b class="hot">' + stats.needYou + '</b>'
     : '<b>0</b>'
-  // 折叠指标：同一个数字（可折叠的行数），措辞跟着开关走 ——
-  // 开着时说"含"（它们在列表里），关着时说"已折叠"（它们被收起来了）。
-  // 数量为 0 时整块不显示：没有可折叠的行，这句话没有信息量。
+  // 同一个数字（已隐藏 + 久候 + 已关闭 三类之和），措辞跟着开关走：
+  // 开着 = 它们就在列表里，关着 = 它们没被列出来。
+  //
+  // **只在「显示全部」关着时出现。**
+  // 判据是"这句话在替你说什么"：关着时那几行你看不见，这是你知道它们存在的
+  // 唯一途径；开着时它们就在列表里、每行状态列写着「· 已隐藏」「· 久候」
+  // 「✕ 已关闭」、压了灰、排在底部 —— 再报一个数只是复述眼前已有的东西。
+  // （早先开着时报「含已隐藏 N / 含折叠 N / 多显示 N 条」，措辞改了三版都别扭：
+  //   要给一句话反复找说法，本身就是它不该存在的信号。）
+  //
+  // 措辞不用「已隐藏 N」：这个数是 已隐藏 + 久候 + 已关闭 三类之和，
+  // 叫「已隐藏」会在混入久候/已关闭时与状态列打架，且只在特定时刻发作。
+  // 三类的枚举进 tooltip —— 状态栏是扫一眼的地方，一句话讲不完就别在这里讲。
   const fh = document.getElementById('foldhint')
-  const fhText = stats.folded > 0
-    ? ((settings.showFolded ? '含已隐藏 ' : '已折叠 ') + stats.folded)
-    : ''
+  const show = !settings.showFolded && stats.folded > 0
+  const fhText = show ? ('未显示 ' + stats.folded + ' 条') : ''
   if (fh.textContent !== fhText) fh.textContent = fhText
+  const fhTip = show ? '已隐藏 / 久候 / 已关闭这三类默认不列出。开关在 ⚙ 设置 →「显示全部」' : ''
+  if (fh.title !== fhTip) fh.title = fhTip
 
   const statEl = document.getElementById('stat')
   if (statEl.innerHTML !== s) statEl.innerHTML = s
@@ -2452,7 +2622,7 @@ window.board.onRows(({ rows, stats, settings }) => {
     dot.className = 'hdot'
     hlabel.textContent = 'hook 正常'
     hstat.title = 'hook 链路正常（4 个事件已注册）\n会话注册表可用，死活与忙闲以它为准'
-      + (stats.closed > 0 ? ('\n已确认关闭 ' + stats.closed + ' 条（⚙ 设置里可批量收起）') : '')
+      + (stats.closed > 0 ? ('\n已确认关闭 ' + stats.closed + ' 条') : '')
     h.textContent = ''
   }
 })

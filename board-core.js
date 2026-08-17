@@ -1253,31 +1253,6 @@ function unhideRecord(sid) {
 // 这里必须同时扫注册表，不能只扫 state 文件 ——
 // 进程已死但注册表条目还在的行**根本没有 state 文件**（强杀不触发 SessionEnd），
 // 老实现只 unlink state 文件，对这类行完全无效，是同一个根因的第二个症状。
-function clearStaleRecords() {
-  const now = Date.now()
-  const reg = readRegistry()
-  const hidden = readHidden()
-
-  let names = []
-  try { names = fs.readdirSync(STATE_DIR) } catch (_) { names = [] }
-  for (const n of names) {
-    if (!n.endsWith('.json')) continue
-    try {
-      const o = JSON.parse(fs.readFileSync(path.join(STATE_DIR, n), 'utf8'))
-      const sid = String(o.session_id)
-      const stale = (o.status === 'waiting' || o.status === 'done') &&
-        (now - (Number(o.updated_ms) || 0)) > IDLE_LONG_MS
-      if (stale || o.status === 'done') hidden[sid] = now
-    } catch (_) { }
-  }
-
-  for (const [sid, rg] of reg) {
-    if (!isPidAlive(rg.pid)) hidden[String(sid)] = now
-  }
-
-  writeHidden(hidden)
-}
-
 module.exports = {
   // countActiveSubwork 单独导出，是为了能用**构造样本**验它 —— 它的两条判据
   // （子代理 mtime / 后台任务的登记与完成通知）都依赖真实运行时才会出现的文件，
@@ -1287,7 +1262,7 @@ module.exports = {
   // 上报面板要把 transcript 里的 cwd 翻成项目名，用的必须是同一套推导 ——
   // 各写一份的话，同一个会话在两个界面上会显示成两个不同的项目名。
   labelFromCwd,
-  removeRecord, unhideRecord, purgeRecord, clearStaleRecords, formatDuration,
+  removeRecord, unhideRecord, purgeRecord, formatDuration,
   // 用量快照的读取与路径由数据层单一定义，界面层/引导层都从这里取 ——
   // 各自硬编码一份路径的话，改一处就会静默错位（引导写 A、看板读 B）。
   readUsageWindows, readSessionMeta, USAGE_SNAPSHOT, HUD_DIR, HUD_CONTEXT_CACHE_DIR,

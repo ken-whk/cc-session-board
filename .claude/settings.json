@@ -1,0 +1,8 @@
+{
+  "enabledPlugins": {
+    "cskl-dev@curatedskills-dev": true,
+    "dc@curatedskills-dev": true,
+    "cskl-dev-devops@curatedskills-dev": true,
+    "cctx-dev-gpb@codifiedcontext-dev": true
+  }
+}

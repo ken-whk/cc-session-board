@@ -27,6 +27,12 @@ dist/
 .quality-lint-state.json
 .sdlc/
 
+# 调试截图（capture.ps1 / CDP 截图 / 图标对照图）
+shot-*.png
+icon-compare.png
+
 # ---- 系统垃圾 ----
 Thumbs.db
 .DS_Store
+.claude/rules/sdlc/
+.deepcritique/profiles

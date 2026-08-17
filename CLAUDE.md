@@ -155,7 +155,7 @@ cp hook.js "$BUNDLE/resources/app/hook.js" && cmp -s hook.js "$BUNDLE/resources/
 
 ### 8. 界面重绘类问题用抓帧比对，别猜
 
-`watch-flicker.ps1` 连续截同一窗口区域逐像素 diff，看 changed 数量与 bbox —— bbox 形态能直接区分"几个数字在变"和"整片重绘"。当年靠它才定位到 WinForms 版闪烁的元凶是 ToolTip 而非刷新逻辑。`capture.ps1` 截当前窗口存 `board-capture.png`。两个都按**窗口标题 + 最小尺寸**匹配，与 UI 框架无关。
+`watch-flicker.ps1` 连续截同一窗口区域逐像素 diff，看 changed 数量与 bbox —— bbox 形态能直接区分"几个数字在变"和"整片重绘"。当年靠它才定位到 WinForms 版闪烁的元凶是 ToolTip 而非刷新逻辑。`capture.ps1` 截当前窗口存 `board-capture.png`。两个都按**窗口标题 + 最小尺寸**匹配，与 UI 框架无关。**截到整片空白 ≠ 程序坏了**：`PrintWindow` 对 GPU 合成的窗口在它没被前台绘制时会返回空帧（2026-08-14 实测，据此误判过一次"包坏了"）。要么先把窗口叫到前台，要么**改走 CDP**：`--remote-debugging-port` 起进程后用 `Page.captureScreenshot` 截渲染层（不经 PrintWindow，窗口在后台也准），并用 `Runtime.evaluate` 问 DOM（`document.querySelectorAll('*').length`、关键元素的 `getBoundingClientRect()`）—— 那是不受截图链路干扰的证据。
 
 `close-board.ps1` 本意是发 `WM_CLOSE` 走正常关闭路径（`win.on('close')` 里的 `saveSettings` 才会执行）。**但它至今匹配的是 `CommandLine -like '*board-wpf*'`，WPF 版 2026-08-10 已删，所以它对 Electron 版恒返回 "no board running"** —— 要保住窗口位置/勾选项，目前只能自己给主窗口 `PostMessage WM_CLOSE`，然后再 `Stop-Process`（关窗口不退进程，它是托盘应用，`window-all-closed` 故意留空）。
 
@@ -168,6 +168,7 @@ cp hook.js "$BUNDLE/resources/app/hook.js" && cmp -s hook.js "$BUNDLE/resources/
 - **mtime 不是判活信号**。子代理写入间隔实测 189 份记录 p50=86s / p90=213s，30 秒窗口下 **95%** 会中途掉出计数。判活 = 10 分钟兜底窗口 + 「晚于该文件最后一次写入的 completed 通知」；通知**只用来证明"已完成"**，反过来用（没通知=还在跑）会在会话空闲时永远误报。后台 Agent 的 `tool_result` 在 spawn 那一刻就落了（实测 use→result 间隔 0.0s），**不是**完成信号。
 - **共享快照里 `updated_at` 是写盘时刻，不是取数时刻**。用量快照全部会话共写一个文件，落后会话会把旧读数配上新鲜时间戳写回去（实测 5h 在 31%/18% 间来回，周期 2–5 秒）。所以"取更新的"没用；只能按配额窗口语义取同 `resets_at` 内的最大值，更旧窗口整条忽略，`resets_at` 已成过去时的不显示。
 - **无终端指纹 ≠ 裸 cmd**。SDK 会话（注册表 `entrypoint=sdk-*`）没有自己的窗口、模型也由宿主选。判成 `console` 会让切窗口只在 conhost/cmd/powershell 里找、永远找不到；`settings.json` 的上下文窗口对它同样不是证据（实测宿主给的是 200k 模型，167k 被按你的 1M 算成 17%，真实约 84% —— 把快撑满显示成很安全）。宿主档由注册表 `entrypoint` 接管，不必等下一次 hook 事件。
+- **截图证明"画对了"，证明不了"点得到"**。自绘控件的装饰层若绝对定位且排在 `<input>` 之后，会盖在它上面把点击全部接走——`.stsw .track` 漏了 `pointer-events:none`，6 个开关一起哑，而截图里它们颜色状态全对（2026-08-17 实测）。交互验收只认 `elementFromPoint(中心点)` 命中谁 + 真实 `Input.dispatchMouseEvent` 后值是否回推；另外 `stSync` 每 1.5 秒 `replaceChildren` 重建分段按钮，重建落在按下与松开之间时 click 不成立，是"偶发点不动"的第二个来源。
 - **窗口标题按词边界匹配**。`oteapi` 会被 `oteapi-facade` 子串劫持，而多个候选之间由 z 序决胜 —— 表现为跟着你最后碰过的窗口漂，不是稳定地错，因此更难查。JetBrains 多个项目窗口住在**同一个** idea64 进程里，pid 也分不开它们。
 
 ---

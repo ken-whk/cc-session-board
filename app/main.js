@@ -18,7 +18,13 @@ const hudGuide = require('./hud-guide.js')
 // 落在 INSTALL_DIR（home 下）而不是应用包内 —— 包内在 macOS/Program Files 下只读，
 // 写设置会静默失败，表现为"每次开都忘记窗口位置和勾选项"。
 const SETTINGS_FILE = path.join(core.INSTALL_DIR, 'ui-electron.json')
+// 托盘用 32 —— 那正是托盘槽位的尺寸，给大图反而要它自己缩。
 const ICON = path.join(__dirname, 'icon.png')
+// 通知和窗口（Alt-Tab）要大图：这两处会把图标显示到 48~96px，
+// 喂 32 的托盘图会被拉糊。Windows 的窗口图标直接给 .ico（内含各档，系统自己挑），
+// 其他平台不认 .ico，退回 256 的 png。
+const ICON_LARGE = path.join(__dirname, 'icon-large.png')
+const ICON_WINDOW = process.platform === 'win32' ? path.join(__dirname, 'icon.ico') : ICON_LARGE
 const REFRESH_MS = 1500
 
 let win = null
@@ -50,6 +56,8 @@ function formatPurgeHours(h) {
 let settings = {
   x: null, y: null, w: 1080, h: 620,
   alwaysOnTop: false, sound: true, notify: true,
+  // 最小化时收进托盘（不在任务栏留一格）。trayHintShown 记"那句解释说过没"。
+  trayOnMinimize: true, trayHintShown: false,
   showFolded: false, sort: 0, autoLaunch: false,
   // 排序改成点表头之后，sort 这个旧键不再使用（留着不删，免得回退版本时丢配置）。
   // sortCol 为空串 = 默认排法（启动顺序）；colWidths 是 {列key: px}。
@@ -123,7 +131,7 @@ function createWindow() {
     width: settings.w, height: settings.h,
     minWidth: 760, minHeight: 380,
     title: 'Claude Code 会话看板',
-    icon: ICON,
+    icon: ICON_WINDOW,
     alwaysOnTop: !!settings.alwaysOnTop,
     autoHideMenuBar: true,
     backgroundColor: resolvedTheme() === 'dark' ? '#1c1f22' : '#ffffff',
@@ -150,6 +158,31 @@ function createWindow() {
 
   win = new BrowserWindow(opts)
   win.loadFile(path.join(__dirname, 'index.html'))
+
+  // 最小化收进托盘：任务栏上不再占一格，托盘图标点一下回来。
+  // Why 默认开：这是个"看一眼就切走"的常驻工具，一天要最小化很多次，
+  // 每次都在任务栏留一格纯属占地方；而托盘本来就常驻（关窗口也不退出，
+  // window-all-closed 是空实现）。
+  // 关掉这个开关就恢复系统默认的最小化行为。
+  win.on('minimize', (e) => {
+    if (!settings.trayOnMinimize) return
+    e.preventDefault()
+    win.hide()
+    // 只提示一次：窗口从任务栏消失是个会吓人的动作，得说清它去哪了。
+    // 之后不再打扰 —— 知道一次就够。
+    if (!settings.trayHintShown) {
+      settings.trayHintShown = true
+      saveSettings()
+      if (process.platform === 'win32' && tray) {
+        try {
+          tray.displayBalloon({
+            title: 'Claude Code 会话看板',
+            content: '已收进托盘，点这个图标回来。不想这样：⚙ 设置 → 关掉「最小化到托盘」',
+          })
+        } catch (_) { /* 气泡失败不影响功能，静默 */ }
+      }
+    }
+  })
 
   win.on('close', saveSettings)
   win.on('closed', () => { win = null })
@@ -222,7 +255,7 @@ function showNotification(title, body, silent, sessionId, onClick) {
 
   let n
   try {
-    n = new Notification({ title, body, icon: ICON, silent })
+    n = new Notification({ title, body, icon: ICON_LARGE, silent })
   } catch (e) {
     console.warn('[board] notification ctor failed: ' + (e && e.message))
     if (isMac) notifyViaOsascript(title, body, silent)
@@ -337,7 +370,6 @@ ipcMain.handle('board:getSessionMeta', (_e, transcript) => {
 ipcMain.handle('board:removeRecord', (_e, sid) => { core.removeRecord(sid); tick(); return true })
 ipcMain.handle('board:unhideRecord', (_e, sid) => { core.unhideRecord(sid); tick(); return true })
 ipcMain.handle('board:purgeRecord', (_e, sid) => { const ok = core.purgeRecord(sid); tick(); return ok })
-ipcMain.handle('board:clearStale', () => { core.clearStaleRecords(); tick(); return true })
 ipcMain.handle('board:openFolder', (_e, dir) => { if (dir) shell.openPath(dir); return true })
 // 帮助面板的状态图例走数据层，别在页面里再抄一份字形和配色
 ipcMain.handle('board:statusLegend', () => core.statusLegend())
@@ -963,12 +995,11 @@ ipcMain.on('board:settingsMenu', (e) => {
     checked: !!settings[key],
     click: (item) => applySetting(key, !!item.checked),
   })
-  const foldedLabel = lastFolded > 0
-    ? ('显示已隐藏 / 久候 / 已关闭（' + lastFolded + '）')
-    : '显示已隐藏 / 久候 / 已关闭'
+  const foldedLabel = lastFolded > 0 ? ('显示全部（' + lastFolded + '）') : '显示全部'
 
   const menu = Menu.buildFromTemplate([
     cb('窗口置顶', 'alwaysOnTop'),
+    cb('最小化到托盘', 'trayOnMinimize'),
     { type: 'separator' },
     cb('提醒响铃', 'sound'),
     cb('系统通知', 'notify'),
@@ -1012,11 +1043,6 @@ ipcMain.on('board:settingsMenu', (e) => {
     },
     { type: 'separator' },
     { ...cb(foldedLabel, 'showFolded'), label: foldedLabel },
-    {
-      label: '把已完成 / 久候 / 已关闭收起来',
-      toolTip: '只记一条"我不想再看见它"的意图，不删数据；它们下次有动静会自己回来',
-      click: () => { core.clearStaleRecords(); tick() },
-    },
     {
       // 常用档一点即中，「自定义」是逃生口 —— 原生菜单里没有输入控件
       // （Electron 连 window.prompt 都禁用了），任意时长只能弹自绘对话框。
@@ -1084,6 +1110,14 @@ if (!app.requestSingleInstanceLock()) {
   app.on('second-instance', showWindow)
 
   app.whenReady().then(() => {
+    // 通知的"应用身份"。不设的话 Windows 只能拿 exe 名兜底，通知卡片顶部
+    // 那行归属看着不像自家应用；设了之后同一应用的通知还会归成一组，
+    // 不再一条条散落在操作中心里。
+    //
+    // 放在最前面：必须早于任何一条通知发出，而 first-run 的引导框之后
+    // 就可能弹通知了。macOS 上这个调用是空操作，不用加平台判断。
+    if (process.platform === 'win32') app.setAppUserModelId('ClaudeCode.SessionBoard')
+
     // 必须在 loadSettings 之前 —— 它负责把 INSTALL_DIR 建出来，
     // 设置文件就在那个目录里。
     const inst = firstRun.ensureInstalled()
@@ -1127,8 +1161,11 @@ if (!app.requestSingleInstanceLock()) {
     }
   })
 
-  // macOS 习惯：点 Dock 图标重新开窗口
-  app.on('activate', () => { if (!win) createWindow() })
+  // macOS 习惯：点 Dock 图标重新开窗口。
+  // **窗口存在但被隐藏时也要叫回来** —— 「最小化到托盘」走的是 win.hide()，
+  // 只判 !win 的话那个窗口在 macOS 上就被困住了：Dock 点击没反应，
+  // 只能去菜单栏图标里找「显示看板」。
+  app.on('activate', () => { if (!win) createWindow(); else showWindow() })
 
   // 关掉窗口不退出（托盘还在），与 macOS 的常规行为一致；
   // Windows 上也保留这个语义 —— 看板本来就是常驻工具。
