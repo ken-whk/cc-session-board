@@ -897,10 +897,25 @@ function buildRows(opts) {
     // 用 updated_ms（最后一次 hook 事件）而不是文件 mtime 算年龄：判"这个会话多久没动静"
     // 是业务问题，mtime 会被拷贝 / 备份 / 同步工具改写。读不到 updated_ms 就不删 ——
     // 宁可留一条脏记录让你手动删，也不拿判不准的年龄去做不可撤销的事。
-    // 从未在注册表里出现过 -> 死活未知，不能断言「已关闭」（详见 everRegistered）
-    const neverRegistered = !reg.has(id) && !everRegistered.has(id)
+    // 从未在注册表里出现过 -> 死活未知，不能断言「已关闭」（详见 everRegistered）。
+    //
+    // 但 everRegistered 只是**本次运行的记忆**：会话结束后重启看板，它就"没见过"了，
+    // 于是那条记录永远停在最后状态（实测：一条 19:23 结束的会话，看板 19:4x 重启后
+    // 一直显示「已完成」）。所以优先用 state 里记着的 pid —— 那是 hook 当时从
+    // 注册表反查到的本会话进程，跨看板重启依然有效。
+    //
+    // 三态而不是两态：
+    //   pid 存在且活着 -> 会话还在（即便它没在注册表里，比如带初始提示词启动的）
+    //   pid 存在且已死 -> **确定关闭**，不必再问"我见过它吗"
+    //   没有 pid       -> 退回 everRegistered 那套（老记录、或从不注册的会话）
+    const statePid = st && Number(st.pid) > 0 ? Number(st.pid) : 0
+    const statePidAlive = statePid ? isPidAlive(statePid) : null
+    const neverRegistered = !reg.has(id) && !everRegistered.has(id) && statePidAlive === null
 
-    if (autoPurgeMs > 0 && st && isOrphan(reg, regUsable, id)) {
+    // 自动删除只对**真残留**下手。statePidAlive === true 表示"注册表里没有、
+    // 但进程还活着"（带初始提示词启动的会话就是这样）—— 那不是残留，删了它
+    // 下一次 hook 事件又会重建，中间还白白丢掉标题和摘要。
+    if (autoPurgeMs > 0 && st && statePidAlive !== true && isOrphan(reg, regUsable, id)) {
       const lastAct = Number(st.updated_ms) || 0
       if (lastAct > 0 && now - lastAct > autoPurgeMs) { purgeRecord(id); continue }
     }
@@ -917,7 +932,10 @@ function buildRows(opts) {
     if (!hasBeat && st) lastMs = Number(st.updated_ms) || 0
     const silent = lastMs > 0 ? now - lastMs : 0
 
-    const alive = !!(rg && isPidAlive(rg.pid))
+    // 活否：注册表里的 pid 优先（那是最新的），没有就用 state 里记下的那个。
+    // 后者让"注册表条目已消失、但进程还在"和"进程也没了"能分开 —— 前者是
+    // 带初始提示词启动的会话（从不注册），后者才是真的关闭了。
+    const alive = !!(rg && isPidAlive(rg.pid)) || statePidAlive === true
     const regStatus = (rg && rg.status) ? String(rg.status) : ''
 
     let eff

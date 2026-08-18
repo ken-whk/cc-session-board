@@ -50,6 +50,32 @@ const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR
   ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
   : path.join(os.homedir(), '.claude')
 const BOARD_DIR = path.join(CLAUDE_DIR, 'session-board')
+
+/**
+ * 按 session_id 到 Claude Code 的活会话注册表里反查本会话的进程 pid。
+ *
+ * 注册表是 ~/.claude/sessions/<pid>.json，文件名就是 pid，内容里有 sessionId。
+ * 只在 state 里还没有 pid 时调用一次，所以这几次小文件读不进热路径。
+ *
+ * @param {string} sessionId
+ * @returns {number|undefined} 找不到就返回 undefined —— 调用方据此"不写这个字段"
+ */
+function lookupSessionPid(sessionId) {
+  if (!sessionId) return undefined
+  const dir = path.join(CLAUDE_DIR, 'sessions')
+  let names = []
+  try { names = fs.readdirSync(dir) } catch (_) { return undefined }
+  for (const n of names) {
+    if (!n.endsWith('.json')) continue
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(dir, n), 'utf8'))
+      if (String(j.sessionId) !== String(sessionId)) continue
+      const pid = Number(j.pid)
+      return Number.isInteger(pid) && pid > 0 ? pid : undefined
+    } catch (_) { /* 单个文件坏了不影响其余 */ }
+  }
+  return undefined
+}
 const STATE_DIR = path.join(BOARD_DIR, 'state')
 
 function readStdin() {
@@ -350,6 +376,20 @@ function main() {
   const now = Date.now()
   const state = {
     session_id: sessionId,
+    // 本会话所属的 Claude 进程 pid。**只查一次**，之后一直沿用。
+    //
+    // 为什么必须记：看板判「已关闭」原本依赖"我这次运行期间在注册表里见过它"，
+    // 于是会话结束后重启看板，那条记录就永远停在最后状态（实测：一条 19:23 就
+    // 结束的会话，看板 19:4x 重启后一直显示「已完成」）。记下 pid 之后，
+    // 判活不再依赖看板的运行时记忆，跨重启也成立。
+    //
+    // 为什么不用 process.ppid：hook 是被壳层拉起的，祖先链会断在已退出的中间
+    // pid 上（同文件上面 detectHost 那段注释里的实测结论），拿到的不是 claude 进程。
+    // 所以改成按 session_id 去注册表里反查——那里的 pid 才是本会话的进程。
+    //
+    // 查不到就不写（比如带初始提示词启动的会话从不注册）——**宁可没有，
+    // 不可写错**：看板对"没有 pid"的处理是不下断言，对"pid 已死"是判已关闭。
+    pid: prev.pid || lookupSessionPid(sessionId),
     cwd: cwd,
     label: deriveLabel(cwd),
     // 终端宿主。每次都重算而不是沿用 prev —— 会话的宿主不会变，但沿用会让
