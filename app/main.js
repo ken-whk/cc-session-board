@@ -170,16 +170,30 @@ function createWindow() {
     win.hide()
     // 只提示一次：窗口从任务栏消失是个会吓人的动作，得说清它去哪了。
     // 之后不再打扰 —— 知道一次就够。
+    //
+    // **标志位只在真的说出口之后才烧掉**。原先是先置 true 再判 win32，于是
+    // mac 上窗口从 Dock 消失、一句解释都没有，而"已经提示过"却被记下了 ——
+    // 之后永远不会再提示。这类"把没做的事记成做过了"最难查。
     if (!settings.trayHintShown) {
-      settings.trayHintShown = true
-      saveSettings()
+      const content = process.platform === 'darwin'
+        ? '已收进菜单栏，点那个图标回来。不想这样：⚙ 设置 → 关掉「最小化到菜单栏」'
+        : '已收进托盘，点这个图标回来。不想这样：⚙ 设置 → 关掉「最小化到托盘」'
+      let told = false
       if (process.platform === 'win32' && tray) {
+        // Windows 走托盘气泡：它从托盘图标上长出来，指向"东西在这儿"
         try {
-          tray.displayBalloon({
-            title: 'Claude Code 会话看板',
-            content: '已收进托盘，点这个图标回来。不想这样：⚙ 设置 → 关掉「最小化到托盘」',
-          })
+          tray.displayBalloon({ title: 'Claude Code 会话看板', content })
+          told = true
         } catch (_) { /* 气泡失败不影响功能，静默 */ }
+      } else if (process.platform === 'darwin') {
+        // mac 没有 displayBalloon（Tray 上那是 Windows 专有 API）。改走系统通知 ——
+        // showNotification 里已经有未签名走 osascript 的兜底，这条不会白发。
+        showNotification('Claude Code 会话看板', content, true)
+        told = true
+      }
+      if (told) {
+        settings.trayHintShown = true
+        saveSettings()
       }
     }
   })
@@ -733,9 +747,15 @@ function openUploadPanel() {
 // 不一定等于域账号，所以页面给下拉让人选盘上真实存在的目录。
 // saved 是**你确认过**的账号，优先级高于枚举和推测：盘上有几十个人的目录，
 // 每次让你在里头找自己是没必要的。枚举结果仍然回给页面，但只当输入提示用。
+// 顺带把平台与 smb 地址带上：挂载引导要按平台换说法和按钮，而它拿到的就是
+// 这两个结果之一。渲染层不自己判平台（navigator.platform 是另一套口径，
+// 两处各判一次迟早对不上），smb 地址也只有数据层一处定义。
+const nasEnv = () => ({ platform: process.platform, smb: uploadCore.nasSmbUrl() })
+
 ipcMain.handle('upload:listUsers', () => Object.assign(
   uploadCore.listExportUsers(),
   { saved: String(settings.nasUser || '') },
+  nasEnv(),
 ))
 
 // 单独一条而不是走 applySetting：那条会顺带 tick() 踢主看板刷新，
@@ -748,6 +768,7 @@ ipcMain.handle('upload:setUser', (e, user) => {
 ipcMain.handle('upload:listDates', (e, user) => Object.assign(
   uploadCore.listUploadedDates(user ? { user: String(user) } : undefined),
   { plugin: uploadCore.resolvePlugin() },
+  nasEnv(),
 ))
 ipcMain.handle('upload:listSessions', (e, date, user) => uploadCore.listUploadedSessions(
   String(date || ''), user ? { user: String(user) } : undefined,
@@ -760,11 +781,39 @@ ipcMain.handle('upload:listSessions', (e, date, user) => uploadCore.listUploaded
 // 这个按钮做的事就是把你送到那个认证框前：用资源管理器打开 UNC 路径，
 // 没认证过的话 Windows 自己会弹框。域内机器且用域账号登录时往往直接就通了
 // （Kerberos/NTLM 单点登录），压根不用手动映射。
+// macOS 上这个按钮**不能**照搬 openPath。
+//
+// Windows 的机制是：打开 UNC 路径 -> 资源管理器发现没认证 -> 系统弹 SMB 认证框，
+// 所以"打开路径"本身就是"去认证"。mac 没有这条：未挂载时 /Volumes/研发专用/…
+// 这个目录**压根不存在**，openPath 只会返回一个错误字符串，点了没反应 ——
+// 而这正是最需要它管用的时刻（要连的时候必然还没挂上）。
+//
+// mac 的等价入口是 smb URL：openExternal('smb://…') 让访达去连，没认证过时
+// 访达自己弹认证框（与 skill 给 mac 的挂载步骤同一条路）。密码仍然只由本人
+// 在系统的框里填，看板不读、不问、不存 —— "不碰凭据"这条性质不变。
 ipcMain.handle('upload:openShare', async () => {
   const root = uploadCore.nasRoot()
+  if (process.platform === 'darwin') {
+    // 已经挂上了就直接开目录（此时 openPath 是对的，还省一次访达连接）
+    let mounted = false
+    try { mounted = fs.statSync(root).isDirectory() } catch (_) { mounted = false }
+    if (mounted) {
+      const err = await shell.openPath(root)
+      return { ok: !err, path: root, error: err || '', via: 'open_path' }
+    }
+    const smb = uploadCore.nasSmbUrl()
+    // env 覆盖了根路径时服务器地址无从推导，如实说不知道，别编一个去连
+    if (!smb) return { ok: false, path: root, error: 'CC_SESSION_NAS_DIR 指向自定义路径，看板推不出服务器地址', via: 'none' }
+    try {
+      await shell.openExternal(smb)
+      return { ok: true, path: smb, error: '', via: 'smb' }
+    } catch (e) {
+      return { ok: false, path: smb, error: String((e && e.message) || e), via: 'smb' }
+    }
+  }
   // shell.openPath 返回错误字符串（空串 = 成功），不抛异常
   const err = await shell.openPath(root)
-  return { ok: !err, path: root, error: err || '' }
+  return { ok: !err, path: root, error: err || '', via: 'open_path' }
 })
 
 // 开一个**交互式** Claude 会话窗口并把提示词填进去。
@@ -779,7 +828,8 @@ ipcMain.handle('upload:openShare', async () => {
 //
 // --plugin-dir：那个插件是 project 作用域装的，不显式加载的话，在别的目录起的
 // 会话看不见 cc-session-nas-upload。显式给上就不依赖你在哪个目录起。
-ipcMain.handle('upload:openClaude', (e, prompt) => {
+// async：mac 分支要等 `open` 的退出码才知道成不成，不能先回一个 ok 再看结果
+ipcMain.handle('upload:openClaude', async (e, prompt) => {
   const text = String(prompt || '').trim()
   if (!text) return { ok: false, reason: 'empty_prompt' }
   const p = uploadCore.resolvePlugin()
@@ -829,6 +879,40 @@ ipcMain.handle('upload:openClaude', (e, prompt) => {
     parts.join(' '),
     'echo; echo "[会话已结束，窗口保留]"',
   ].join('\n') + '\n'
+
+  // macOS：同一段 bash 写成 .command 文件交给「终端」。**在写 rcfile 之前分叉** ——
+  // 那个 rcfile 只有 mintty 用得上，在 mac 上写它等于在临时目录里留一个永不执行
+  // 的文件，还会让"写失败"变成一条与本平台无关的报错。
+  //
+  // Why 用 `open -a Terminal <file>`：mac 上没有 mintty，而这是唯一不需要
+  // AppleScript 自动化权限、也不经任何 shell 解析的开窗方式（中文提示词在文件里，
+  // 以 utf8 落盘，终端按 UTF-8 读 —— 与 Windows 侧躲开控制台代码页同一个理由）。
+  //
+  // .command 必须带执行位，否则终端拒绝运行；交叉打包时 NTFS 存不住执行位，
+  // 所以每次生成都显式 chmod，不指望包里的权限。
+  //
+  // **这条路径未在真机实测**（开发机是 Windows），所以结果如实回报、不假装成功。
+  // 原先这里没有 mac 分支，会掉进下面的 cmd.exe 兜底：spawn 对不存在的可执行
+  // 文件不同步抛错，try/catch 抓不到，于是返回 ok:true（谎报"已开窗口"），
+  // 而那个 ChildProcess 还会异步 emit 一个没人监听的 'error' 事件 ——
+  // Node 对此是抛出，即主进程一个未捕获异常。
+  if (process.platform === 'darwin') {
+    const cmdFile = path.join(app.getPath('temp'), 'cc-board-launch.command')
+    try {
+      fs.writeFileSync(cmdFile, '#!/bin/bash\n' + script, 'utf8')
+      fs.chmodSync(cmdFile, 0o755)
+    } catch (err) {
+      return { ok: false, reason: 'command_write_failed: ' + String((err && err.message) || err) }
+    }
+    return await new Promise((resolve) => {
+      execFile('/usr/bin/open', ['-a', 'Terminal', cmdFile], { timeout: 15000 }, (err) => {
+        resolve(err
+          ? { ok: false, reason: 'open_terminal_failed: ' + err.message }
+          : { ok: true, via: 'terminal' })
+      })
+    })
+  }
+
   try { fs.writeFileSync(rc, script, 'utf8') } catch (err) {
     return { ok: false, reason: 'rcfile_write_failed: ' + String((err && err.message) || err) }
   }
@@ -846,6 +930,12 @@ ipcMain.handle('upload:openClaude', (e, prompt) => {
         cwd: home,
         detached: true, stdio: 'ignore', windowsHide: false,
       })
+      // 必须挂 'error'：spawn 对"可执行文件不存在/被策略挡住"是**异步** emit
+      // 'error' 而不是同步抛错，外面的 try/catch 抓不到；而 ChildProcess 是
+      // EventEmitter，没人监听的 'error' 事件 Node 直接抛 —— 那就是主进程一个
+      // 未捕获异常（打包版上表现为"点一下就崩"）。只留痕不改返回值：窗口已经
+      // detached 出去了，这里回不了头。
+      child.on('error', (err) => { console.warn('[board] openClaude mintty error: ' + err.message) })
       child.unref()
       return { ok: true, via: 'mintty' }
     }
@@ -853,6 +943,7 @@ ipcMain.handle('upload:openClaude', (e, prompt) => {
     const child = spawn('cmd.exe', ['/c', 'start', '', 'cmd', '/k', 'claude', text], {
       detached: true, stdio: 'ignore', windowsHide: false,
     })
+    child.on('error', (err) => { console.warn('[board] openClaude cmd error: ' + err.message) })
     child.unref()
     return { ok: true, via: 'cmd', warn: 'cmd 路径下中文提示词可能乱码' }
   } catch (err) {
@@ -863,7 +954,15 @@ ipcMain.handle('upload:openClaude', (e, prompt) => {
 // 直连被拒时的退路：拉起系统「映射网络驱动器」向导。
 // 同样只是打开向导，账号密码仍由你在向导里填，并且要**勾上「记住我的凭据」**——
 // 不勾的话下次重连还得再输一遍。
+//
+// **Windows 专有，且这不是缺口**：Windows 有两套机制（透明认证 / 凭据向导），
+// 所以有两个按钮；mac 只有一套（访达连接服务器 -> 认证框 -> 勾"存入钥匙串"），
+// 上面的 openShare 已经把它整条走完了。所以 mac 这里如实报不支持，由界面换成
+// 「拷贝服务器地址」+ mac 口径的步骤说明 —— 而不是留一个点了什么都不发生的按钮
+// （原先 execFile('rundll32.exe') 在 mac 上失败进回调、却照样 return ok:true，
+//  是货真价实的谎报成功）。
 ipcMain.handle('upload:mapDrive', () => {
+  if (process.platform !== 'win32') return { ok: false, reason: 'unsupported_platform' }
   try {
     execFile('rundll32.exe', ['shell32.dll,SHHelpShortcuts_RunDLL', 'Connect'], { windowsHide: false }, () => { })
     return { ok: true }
@@ -999,7 +1098,8 @@ ipcMain.on('board:settingsMenu', (e) => {
 
   const menu = Menu.buildFromTemplate([
     cb('窗口置顶', 'alwaysOnTop'),
-    cb('最小化到托盘', 'trayOnMinimize'),
+    // mac 上那个常驻图标住在菜单栏、不叫托盘；说错地方等于让人去找一个不存在的东西
+    cb(process.platform === 'darwin' ? '最小化到菜单栏' : '最小化到托盘', 'trayOnMinimize'),
     { type: 'separator' },
     cb('提醒响铃', 'sound'),
     cb('系统通知', 'notify'),

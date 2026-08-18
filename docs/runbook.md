@@ -36,7 +36,11 @@ node install-hooks.js    # 注册 4 个 hook（首次启动时 app/first-run.js 
 真要重新发给同事时：
 
 1. **先 `npm i`** —— `node_modules/`（electron + electron-packager，约 374M）已在 2026-08-10 清理时删掉，仓里只有 `package.json` / `package-lock.json`。不装依赖直接跑 `npm run pack:*` 会失败。
-2. `npm run pack:win` / `npm run pack:mac`，产物落 `dist/`（该目录里旧的两个包已删，是可重新生成的产物）。
+2. Windows 包 `npm run pack:win`；**macOS 包跑 `build-mac.cmd`**（不是 `npm run pack:mac` —— 那条已改成直接报错并指向这里，见下条 4 的理由）。产物落 `dist/`（该目录里的包是可重新生成的产物）。
 3. **打 macOS 包必须提权**（或开开发者模式）：`.app` 内含 14 个符号链接，Windows 建符号链接要管理员权限。不满足时 electron-packager **只打印一行 skip 然后什么都不产出**，不报错也不退出非零，极易误判成"打好了"。自查 `find X.app -type l | wc -l` 应为 14。
-4. **必须用 tar.gz 传 macOS 包**，zip 会破坏符号链接；Mac 侧也必须 `tar -xzf`，不能双击解压。执行位在 NTFS 上必然丢失，要 Mac 侧 `chmod +x`，外加 `xattr -dr com.apple.quarantine` 解 Gatekeeper 隔离。
+4. **macOS 包只能由 `build-mac.cmd` 打，不要手敲 tar**。它在 electron-packager 之后接一步 `tar --mode=755` 把执行位**写进归档**——Git Bash 的 `chmod` 在 NTFS 上是 no-op（2026-08-18 实测：`chmod 755` 后 `ls -l` 仍 `-rw-r--r--`），所以权限只能在打包这一刻给，给不了就得让每个 Mac 同事手敲三条 `chmod +x`。
+
+   两个坑：① **不能用裸 `tar`**——Win10 1803+ 的 `tar` 是 `System32\tar.exe`（bsdtar），它直接拒绝 `--mode`（`Option --mode=755 is not supported`），脚本因此按全路径找 Git 自带的 GNU tar；② 仍**必须走 tar.gz**，zip 会破坏符号链接，Mac 侧也仍用 `tar -xzf` 解压（"双击解压会不会毁符号链接"这条至今没真机核实，先保守）。
+
+   Gatekeeper 隔离照旧：从共享盘/U 盘拿包通常不会被标记；被拦时右键→打开一次，或 `xattr -dr com.apple.quarantine`。
 5. **打完审隐私**：`--ignore` 漏了会把 `state/`（含你的会话标题、项目路径、你敲的原话）、`_last-payload-*.json`（含 prompt 原文）、UI 设置、调试截图一起打进去。曾实测把含会话标题和项目路径的 `board-capture.png` 打进过两个包。打完 grep 一遍产物确认。

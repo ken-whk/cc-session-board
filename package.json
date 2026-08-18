@@ -7,7 +7,7 @@
     "start": "electron .",
     "icon": "electron app/make-icon.js",
     "pack:win": "electron-packager . ClaudeBoard --platform=win32 --arch=x64 --out=dist --overwrite --asar=false --icon=app/icon.ico --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|^/(capture|watch-flicker|close-board)\\.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/_env-probe|^/cc-board-focuswin|^/board-capture|^/frames|^/\\.(claude|sdlc|deepcritique|quality-lint-state|gitattributes|gitignore)|^/docs$|^/CLAUDE\\.md$|^/package-lock\\.json$|^/app/icon-source\\.jpg$)\" && node postpack.js",
-    "pack:mac": "electron-packager . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --icon=app/icon.icns --ignore=\"(^/dist$|^/node_modules/electron$|^/state$|^/(capture|watch-flicker|close-board)\\.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/_env-probe|^/cc-board-focuswin|^/board-capture|^/frames|^/\\.(claude|sdlc|deepcritique|quality-lint-state|gitattributes|gitignore)|^/docs$|^/CLAUDE\\.md$|^/package-lock\\.json$|^/app/icon-source\\.jpg$)\" && node postpack.js"
+    "pack:mac": "node -e \"console.error('use build-mac.cmd instead: it needs admin (symlinks) and bakes the exec bits in via tar --mode=755. Packing without it ships a .app the Mac side must chmod by hand.'); process.exit(1)\""
   },
   "private": true,
   "devDependencies": {

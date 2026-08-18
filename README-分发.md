@@ -56,35 +56,47 @@ macOS（ClaudeBoard-mac-arm64.tar.gz）
 
 ★ 这个包只支持 Apple Silicon（M 系列芯片）。Intel Mac 请找我要 x64 版本。
 
-必须用命令行装，四步缺一不可（原因在每步后面）：
+两步：
 
     tar -xzf ClaudeBoard-mac-arm64.tar.gz
-    cd ClaudeBoard-darwin-arm64
 
-    find ClaudeBoard.app -type f -path "*/Contents/MacOS/*" -exec chmod +x {} +
-    find ClaudeBoard.app -type f -name "*.dylib" -exec chmod +x {} +
-    chmod +x "ClaudeBoard.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Helpers/chrome_crashpad_handler"
+    双击 ClaudeBoard-darwin-arm64/ClaudeBoard.app
 
-    xattr -dr com.apple.quarantine ClaudeBoard.app
+**不再需要 chmod。** 执行位已经打进压缩包里了（打包脚本 `build-mac.cmd` 用
+`tar --mode=755` 写权限，不经 Windows 文件系统那一层）。如果你手上还有旧版
+说明书里那三条 `find ... -exec chmod +x` ，可以扔了。
 
-    open ClaudeBoard.app
-
-为什么不能双击解压：
+为什么解压要用命令行、不双击：
     .app 内部有 14 个符号链接（Electron Framework 那套）。
-    「归档实用工具」会把它们展开成普通文件，应用直接跑不起来。
+    「归档实用工具」有把它们展开成普通文件的风险，那样应用跑不起来。
+    这一条至今没有在真机上核实过 —— 你要是双击解压后 .app 能正常打开，
+    告诉我一声，这行就能删掉。
 
-为什么要 chmod +x：
-    这个包是在 Windows 上交叉打出来的，NTFS 存不了 Unix 执行位，
-    归档里的主程序权限是 -rw-r--r--。不补执行位，双击会报「无法打开」。
+首次打开被 Gatekeeper 拦下（「无法打开，因为来自身份不明的开发者」）：
+    程序没有 Apple 开发者签名。两条路二选一 ——
+      · 右键点 ClaudeBoard.app → 打开 → 在弹框里再点一次「打开」（只需一次）
+      · 或者执行：xattr -dr com.apple.quarantine ClaudeBoard.app
+    从共享盘 / U 盘拷过来的包通常压根不会被拦（隔离标记是浏览器、邮件、
+    IM 这类下载器打上去的），所以优先走共享盘拿包。
 
-为什么要 xattr：
-    程序没有 Apple 开发者签名，Gatekeeper 默认拦下从网络拿到的应用。
+macOS 上的已知限制（功能都在，这几处的表现和 Windows 不一样）：
 
-macOS 上的一个已知限制：
-    系统通知需要应用已签名才能弹出，所以这个包改用 osascript 兜底。
-    弹出的通知归属会显示成「脚本编辑器」而不是看板本身；
-    首次可能需要在「系统设置 → 通知」里给脚本编辑器放行。
-    Dock 图标弹跳提醒不受影响。
+    通知归属       系统通知需要应用已签名才能弹出，所以这个包改用 osascript 兜底。
+                   弹出的通知归属会显示成「脚本编辑器」而不是看板本身；
+                   首次可能需要在「系统设置 → 通知」里给脚本编辑器放行。
+                   Dock 图标弹跳提醒不受影响。
+
+    切窗口         双击切到会话所在窗口这条在 mac 上**没有真机实测过**（开发机是
+                   Windows）。找不到窗口时它不报错，静默退回打开工作目录。
+
+    连共享盘       走访达而不是「映射网络驱动器」：点「连接共享」会让访达连
+                   smb://172.17.100.110/研发专用，系统自己弹认证框 ——
+                   填域账号，勾上「在我的钥匙串中记住此密码」。
+                   也可以点「拷贝服务器地址」，自己在访达按 ⌘K 粘贴。
+
+    上报当日       开的是「终端」窗口（Windows 那边开的是 Git Bash）。
+                   如果终端里报 claude: command not found，说明 claude 不在
+                   登录 shell 的 PATH 里，在那个窗口里手敲一次即可。
 
 
 ------------------------------------------------------------------
@@ -143,8 +155,10 @@ macOS 上的一个已知限制：
                     ⚙ 设置里填，两处是同一个值
    ↥ 上报当日…      开一个 Claude 窗口并自动输入「帮我列出今天的会话」，
                     接下来在那个窗口里对话上报
-   连不上共享盘     会给出挂载引导（打开共享 / 映射网络驱动器）。两个按钮
-                    都只是把你送到系统自己的认证框前，密码只能你本人填
+   连不上共享盘     会给出挂载引导，按平台给对应的入口：
+                    Windows = 打开共享 / 映射网络驱动器；
+                    macOS   = 连接共享（访达连 smb://）/ 拷贝服务器地址。
+                    它们都只是把你送到系统自己的认证框前，密码只能你本人填
 
    看板只读共享盘、只展示已经报上去的内容 —— 上报本身走
    cc-session-nas-upload 这个 skill，在 Claude 会话里对话完成。

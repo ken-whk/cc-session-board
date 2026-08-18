@@ -75,13 +75,44 @@ function resolvePlugin() {
   }
 }
 
-// NAS 根。与 skill 的默认推导保持一致，允许环境变量覆盖。
-// 不做"探测多个候选路径"那套：那是 skill 脚本的职责，看板只读它约定的位置，
-// 读不到就如实说读不到。
+// NAS 服务器与共享名。mac 挂载要的是 smb URL（服务器 + 共享），与挂载后的
+// 本地路径是两件不同的事，所以单独记 —— 从 /Volumes/... 反推服务器地址推不出来。
+// 值取自 cc-session-nas-upload SKILL.md（0.9.0）给 mac 的挂载步骤：
+// 「访达 → 连接服务器 → smb://172.17.100.110/研发专用」。
+const NAS_SMB_URL = 'smb://172.17.100.110/研发专用'
+
+// macOS 挂载点候选，**顺序与 skill 一致**（SKILL.md 0.9.0：依次探测
+// `/Volumes/研发专用/AI_SDLC`、`/Volumes/研发专用`）。
+//
+// Why 必须跟着探两档：挂 smb://172.17.100.110/研发专用 得到前者，
+// 直接挂到 AI_SDLC 这一层则只有后者。少探一档的表现极隐蔽 —— skill 上报成功，
+// 看板的上报日历却一直说"NAS 读不到"，两边都不报错，正是本文件开头那句
+// "猜错很难自查"。
+const NAS_MAC_CANDIDATES = ['/Volumes/研发专用/AI_SDLC', '/Volumes/研发专用']
+
+/**
+ * 挂载后的 NAS 根路径。允许 `CC_SESSION_NAS_DIR` 覆盖（与 skill 同名）。
+ *
+ * macOS 上按 skill 的顺序探测候选挂载点；一个都不在时返回**第一个**候选 ——
+ * 那是给人看的默认路径，错误文案里显示它比显示空串有用。
+ */
 function nasRoot() {
   if (process.env.CC_SESSION_NAS_DIR) return process.env.CC_SESSION_NAS_DIR
   if (process.platform === 'win32') return '\\\\172.17.100.110\\研发专用\\AI_SDLC'
-  return '/Volumes/研发专用/AI_SDLC'
+  for (const c of NAS_MAC_CANDIDATES) {
+    try { if (fs.statSync(c).isDirectory()) return c } catch (_) { /* 下一个候选 */ }
+  }
+  return NAS_MAC_CANDIDATES[0]
+}
+
+/**
+ * mac 挂载共享用的 smb 地址。
+ *
+ * 用户用 `CC_SESSION_NAS_DIR` 指到别处时返回空串 —— 那种情况下服务器地址
+ * **无从推导**，界面据此不显示"帮你连接"的入口，而不是编一个地址让人去连。
+ */
+function nasSmbUrl() {
+  return process.env.CC_SESSION_NAS_DIR ? '' : NAS_SMB_URL
 }
 
 // 上报目录名的**推测值**。skill 默认取 git config user.email 的 @ 前半段。
@@ -371,7 +402,9 @@ module.exports = {
   listUploadedDates,
   listUploadedSessions,
   guessExportUser,
-  nasRoot,
+  // 挂载后的本地根路径 与 挂载用的 smb 地址是两件事，都由数据层单一定义 ——
+  // 界面层各自硬编码一份的话，改一处必然漏掉另一处（读 A、连 B）
+  nasRoot, nasSmbUrl,
   // 上报提醒：前两个是纯函数，主进程和自检都从这里取，不各写一份
   DEFAULT_REMIND_TIMES, localDate, parseTimes, dueReminders, hasUploadedOn,
 }
@@ -379,6 +412,9 @@ module.exports = {
 // 直接运行 = 自检：三条读路径各跑一遍，看真实环境下是否成立
 if (require.main === module) {
   console.log('plugin:', JSON.stringify(resolvePlugin()))
+  // 平台相关的两个值一并打出来：换机器/换平台后第一件要核对的就是它们
+  console.log('platform: ' + process.platform + '  nasRoot=' + nasRoot()
+    + '  smb=' + (nasSmbUrl() || '(env 覆盖，无法推导)'))
   const users = listExportUsers()
   console.log('export users: ok=' + users.ok + (users.reason ? ' reason=' + users.reason : '')
     + '  guess=' + users.guess + '  found=[' + users.users.join(', ') + ']')
