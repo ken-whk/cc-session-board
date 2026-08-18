@@ -341,6 +341,13 @@
   /* 灯必须带标签。只放一颗裸的绿点，没人看得出它在说什么 ——
      实测：第一个看到的人就问了"这个小绿点是做什么的"。 */
   .hstat { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-strong); }
+  /* 「今天还没上报」。用「等你输入」那一档的橙色 —— 底栏不引入第二套告警色，
+     而它表达的正是同一件事：球在你手上。
+     :empty 隐藏是必须的，不是顺手：statusbar 是 flex + gap，空的 span 照样
+     算一个 flex item、照样吃掉 14px 间距，看着就是"底栏无缘无故多了个洞"。 */
+  .pending { color: var(--c-waiting); cursor: pointer; }
+  .pending:empty { display: none; }
+  .pending:hover { text-decoration: underline; }
   .sep { width: 1px; height: 12px; background: var(--chip-line); }
   /* 两个窗口之间插竖线而不是单纯拉大间距：光靠间距，"余2h34m 周" 这种
      文字紧挨着仍然读成一串，分不清 "余6d8h" 是哪一组的。竖线是底栏已有的
@@ -921,6 +928,10 @@
   <!-- 折叠/隐藏指标。原先「含已隐藏」挤在顶栏的"非常态提示"里、而「已折叠 N」
        又在会话计数里 —— 同一件事被拆到两处。合并成这一个：开关状态 + 数量。 -->
   <span class="foldhint" id="foldhint"></span>
+  <!-- 「今天还没上报」。紧跟会话计数，与它同属"要你行动"那一类；
+       用量是预算类信息，隔一条竖线放在后面。17:30 之前、今天已报、
+       今天没有会话可报、或关掉了上报提醒时，这一格是空的（CSS 里 :empty 隐藏）。 -->
+  <span class="pending" id="pending" title=""></span>
   <span class="sep"></span>
   <span class="usage" id="usage"></span>
   <span class="grow"></span>
@@ -2074,6 +2085,45 @@ stQ('stNasUser').addEventListener('change', async () => {
 })
 
 let arLoaded = false
+// ---- 底栏「今天还没上报」----
+//
+// 显示与否**完全由主进程定**（它才知道 17:30 到没到、今天报没报过）——
+// 页面这边只负责把它说出来，不自己判时间也不自己读 NAS。两处各判一次，
+// 迟早出现"底栏说还没报、通知说已经报了"。
+//
+// 一条额外的自我克制：count 为 0 时不显示。今天一个会话都没动过就没有欠账，
+// 这时候挂一句"还没上报"是在为一件不存在的事催人。
+const pendingEl = document.getElementById('pending')
+function renderPending(p) {
+  if (!p || !(p.count > 0)) {
+    if (pendingEl.textContent !== '') { pendingEl.textContent = ''; pendingEl.title = '' }
+    return
+  }
+  // 措辞用「待上报」而不是「未上报」：前者是待办，后者读着像失职。
+  // 数字是**今天动过的会话数**，不是"差多少条切片"—— 后者只有 skill 算得出
+  // （它比对过 NAS 的 uploadState），看板本地拿不到，所以不假装给。
+  const text = '↥ 今天 ' + p.count + ' 个会话待上报' + (p.verified ? '' : '（没核对上）')
+  const why = {
+    nas_unreachable: 'NAS 读不到，没能核对 —— 已经报过就忽略这条',
+    no_user_dir: '域账号目录不存在（账号填错？），没能核对',
+    no_user: '还没设域账号，没能核对',
+    error: '核对出错',
+    no_upload_today: '共享盘上今天还没有你的上报目录',
+    empty_day_dir: '今天的目录建了但里面是空的，上报可能中途断了',
+  }[p.reason] || ''
+  const at = p.checkedMs ? new Date(p.checkedMs).toLocaleTimeString().slice(0, 5) : ''
+  pendingEl.textContent = text
+  pendingEl.title = [
+    '17:30 之后才出现；今天报过就自动消失。',
+    why,
+    at ? ('最近一次核对：' + at + '（点这里打开上报日历，会顺带重新核对）') : '',
+    '数字是今天有过动静的会话数，含已关闭和已隐藏的 —— 它们今天也产生过对话。',
+  ].filter(Boolean).join('\n')
+}
+// 点它 = 去上报日历。与提醒通知点开的落点一致（术语只有「上报日历」一个），
+// 而打开日历本身要读 NAS，主进程会借那次读把这条指示重新核一遍。
+pendingEl.addEventListener('click', () => arOpen())
+
 function arSyncTabs(on) {
   arQ('tabArchive').classList.toggle('on', on)
   arQ('tabBoard').classList.toggle('on', !on)
@@ -2672,6 +2722,8 @@ window.board.onRows(({ rows, stats, settings }) => {
   // 措辞不用「已隐藏 N」：这个数是 已隐藏 + 久候 + 已关闭 三类之和，
   // 叫「已隐藏」会在混入久候/已关闭时与状态列打架，且只在特定时刻发作。
   // 三类的枚举进 tooltip —— 状态栏是扫一眼的地方，一句话讲不完就别在这里讲。
+  renderPending(stats.uploadPending)
+
   const fh = document.getElementById('foldhint')
   const show = !settings.showFolded && stats.folded > 0
   const fhText = show ? ('未显示 ' + stats.folded + ' 条') : ''

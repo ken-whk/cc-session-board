@@ -311,6 +311,11 @@ function tick() {
       sortIndex: settings.sort,
       showFolded: settings.showFolded,
       autoPurgeHours: settings.autoPurgeHours,
+      // 「今天动过的会话有几个」。纯本地计算（比对 state 的 updated_ms），
+      // 不碰 NAS —— 底栏那条指示的**数字**来自这里，**该不该显示**才来自
+      // 那一天最多几次的 NAS 核对。两件事分开，才不至于为了刷新一个数字
+      // 把共享盘拖进 1.5 秒的循环。
+      activeSinceMs: uploadCore.localDayStartMs(),
     })
   } catch (e) {
     // 异常不静默吞掉 —— 否则界面静止不动，人会读成"没有会话在变化"
@@ -366,6 +371,17 @@ function tick() {
         overlay: USE_OVERLAY,
         health: core.getHealthIssues(),
         platform: process.platform,
+        // 「今天还没上报」指示。null = 不显示（没到 17:30 / 今天已报 /
+        // 关掉了上报提醒）。跟着 uploadRemind 走：那个开关表达的是"上报这件事
+        // 别来烦我"，只关掉通知却在底栏常驻一句欠账，等于没关。
+        uploadPending: (settings.uploadRemind && uploadPending)
+          ? {
+            count: res.activeSince,
+            verified: uploadPending.verified,
+            reason: uploadPending.reason,
+            checkedMs: uploadPending.checkedMs,
+          }
+          : null,
       },
       settings,
     })
@@ -765,11 +781,29 @@ ipcMain.handle('upload:setUser', (e, user) => {
   saveSettings()
   return settings.nasUser
 })
-ipcMain.handle('upload:listDates', (e, user) => Object.assign(
-  uploadCore.listUploadedDates(user ? { user: String(user) } : undefined),
-  { plugin: uploadCore.resolvePlugin() },
-  nasEnv(),
-))
+ipcMain.handle('upload:listDates', (e, user) => {
+  const res = uploadCore.listUploadedDates(user ? { user: String(user) } : undefined)
+
+  // 顺带重核底栏那条「今天还没上报」。
+  //
+  // Why 挂在这里：这次 NAS 读**本来就在发生**（你打开或刷新了上报日历），
+  // 从它的结果里读出"今天有没有目录"是零成本的，而且这正是你报完之后
+  // 让指示立刻消失的那条路 —— 否则要等下一个提醒点才更新。
+  //
+  // 只在**看的是自己那份**时才据此下结论：日历上可以切到别人的域账号看，
+  // 拿别人的目录去断言"我今天报了没"是典型的张冠李戴（铁律 9）。
+  const mine = !user || String(user) === String(settings.nasUser || '')
+  if (mine && pastPendingHour(new Date())) {
+    const today = uploadCore.localDate()
+    const hit = res.ok ? res.dates.find((d) => d.date === today) : null
+    applyPendingResult(
+      { ok: !!res.ok, uploaded: !!(hit && hit.sessions > 0), reason: res.reason || '' },
+      today,
+    )
+  }
+
+  return Object.assign(res, { plugin: uploadCore.resolvePlugin() }, nasEnv())
+})
 ipcMain.handle('upload:listSessions', (e, date, user) => uploadCore.listUploadedSessions(
   String(date || ''), user ? { user: String(user) } : undefined,
 ))
@@ -981,6 +1015,57 @@ ipcMain.handle('upload:mapDrive', () => {
 // 出口"这条性质（与上报窗口同一条纪律）。
 const REMIND_CHECK_MS = 30000
 
+// ---- 底栏「今天还没上报」指示 ----
+//
+// 与上面的提醒是同一件事的两种呈现：提醒是**敲你一下**（一天几次），这条是
+// **常驻的欠账指示**（看一眼就知道今天这笔还欠着）。所以判定完全复用提醒那套
+// （hasUploadedOn 读 NAS + remindDoneDate 当天记忆），不另起一条判据。
+//
+// 只在 17:30 之后出现：更早出现没有意义 —— 一天还没过完，"还没上报"是常态，
+// 常态不该占底栏一格（与 health 灯、offhint 同一条原则：正常无需发声）。
+const PENDING_AFTER_MIN = 17 * 60 + 30
+
+// NAS 读的时机是这条功能唯一的设计风险，写死在这里：
+//   ① 过 17:30 之后的第一次 30 秒周期（每天一次）
+//   ② 四个提醒点各自那次（本来就要读，顺带更新，零额外开销）
+//   ③ 你打开 / 刷新上报日历时（同样是本来就在读）
+// **绝不进 tick()** —— 1.5 秒一轮去 stat 共享盘就是后台轮询 NAS，
+// 会破掉看板"无后台网络出口"这条性质（CLAUDE.md 上报提醒那节的第四条）。
+// 代价（知情接受）：你在 17:40 报完，这条指示最晚要等到 18:00 那次提醒才消失；
+// 想立刻消掉就点它一下 —— 那会打开上报日历，而日历加载本身就会重核。
+let uploadPending = null
+let pendingCheckedDate = ''
+
+// 现在过 17:30 了没。纯时钟判断，不碰任何 IO —— 每 30 秒都要问一次。
+function pastPendingHour(now) {
+  return (now.getHours() * 60 + now.getMinutes()) >= PENDING_AFTER_MIN
+}
+
+/**
+ * 重算「今天还没上报」的指示状态。
+ *
+ * @param {{ok:boolean, uploaded:boolean, reason?:string}} r hasUploadedOn 的结果
+ * @param {string} date 本地日期（YYYY-MM-DD）
+ */
+function applyPendingResult(r, date) {
+  pendingCheckedDate = date
+  // 已经报过 -> 这条指示直接消失。事做完了就不该继续在底栏挂着一句欠账，
+  // 那是"一个看着开着、其实已经不成立"的提示（与提醒当天不再打扰同一条）。
+  if (r && r.ok && r.uploaded) {
+    remindDoneDate = date
+    uploadPending = null
+    return
+  }
+  // ok=false 是"核对不了"（没设域账号 / NAS 读不到），**不等于没报**，
+  // 但也绝不能当成已报把指示藏掉 —— 藏掉就是拿"不知道"冒充"安全"。
+  // 照常显示，并在文案里说清没核对上，由人自己判断。
+  uploadPending = {
+    verified: !!(r && r.ok),
+    reason: (r && r.reason) || '',
+    checkedMs: Date.now(),
+  }
+}
+
 let remindTimer = null
 // 上一次 NAS 读还没回来就不叠第二次：SMB 挂住时能拖十几秒，30 秒的周期会往上摞
 let remindBusy = false
@@ -1007,12 +1092,38 @@ function markRemindFired(date, due) {
 
 async function checkUploadReminder() {
   if (!settings.uploadRemind || remindBusy) return
+  const now = new Date()
   const { date, due } = uploadCore.dueReminders({
-    now: new Date(),
+    now,
     times: settings.uploadRemindTimes,
     firedDate: settings.uploadRemindFiredDate,
     fired: settings.uploadRemindFired,
   })
+
+  // 跨天先清账：昨天的结论（"已报"记忆、指示状态）今天一律不算数。
+  // 不清的话，昨晚报过之后看板一直开着，今天 17:30 会因为 remindDoneDate
+  // 还停在昨天而直接跳过核对，指示永远不出现。
+  if (pendingCheckedDate && pendingCheckedDate !== date) {
+    pendingCheckedDate = ''
+    uploadPending = null
+  }
+
+  // 底栏指示的**每日第一次**核对：过了 17:30 且今天还没核过。
+  // 与下面提醒点那次共用同一个 remindBusy 闸和同一个 hasUploadedOn，
+  // 所以每天最多多出这一次 NAS 读。
+  if (pastPendingHour(now) && pendingCheckedDate !== date && remindDoneDate !== date) {
+    remindBusy = true
+    let pr
+    try {
+      pr = await uploadCore.hasUploadedOn(date,
+        settings.nasUser ? { user: settings.nasUser } : undefined)
+    } catch (_) {
+      pr = { ok: false, reason: 'error' }
+    }
+    remindBusy = false
+    applyPendingResult(pr, date)
+  }
+
   if (!due.length) return
   // 今天已核实报过：后面的点直接记掉，不必再为它们各读一次 NAS
   if (remindDoneDate === date) { markRemindFired(date, due); return }
@@ -1027,6 +1138,9 @@ async function checkUploadReminder() {
   }
   remindBusy = false
   markRemindFired(date, due)
+  // 这次读本来就要发生，顺带把底栏指示一起更新 —— 零额外网络开销。
+  // 这也是"17:40 报完、18:00 那次提醒把指示抹掉"的那条路径。
+  applyPendingResult(r, date)
 
   if (r.ok && r.uploaded) { remindDoneDate = date; return }
 

@@ -851,6 +851,13 @@ function buildRows(opts) {
   const autoPurgeHours = Math.max(0, Number(opts && opts.autoPurgeHours) || 0)
   const autoPurgeMs = autoPurgeHours * 60 * 60 * 1000
 
+  // 「这个时刻之后动过的会话有几个」。0 = 不算。
+  //
+  // 传进来的是**毫秒阈值**而不是日期：什么算"今天"由调用方定（上报那条线按本地
+  // 日期切，见 upload-core.localDayStartMs），数据层只负责数。这样日期口径仍然
+  // 只有一处定义，而这里也不必认识"天"这个概念（与 autoPurgeHours 同一条纪律）。
+  const activeSinceMs = Math.max(0, Number(opts && opts.activeSinceMs) || 0)
+
   const now = Date.now()
   const reg = readRegistry()
   const states = readStates()
@@ -1153,6 +1160,13 @@ function buildRows(opts) {
       dur,
       silent,
       started,
+      // 这个会话最后一次有动静的时刻（hook 事件；拿不到就退回心跳）。
+      //
+      // 给出去是为了让上层能问"今天有哪些会话动过" —— 那是「今天还没上报」
+      // 要数的东西。**只给原始毫秒、不在这里判"是不是今天"**：日期分桶的口径
+      // 必须与上报目录名一致（本地日期，见 upload-core.localDate），而那是
+      // 上报那条线的事实，抄进数据层就成了第二份定义。
+      updatedMs: (st && Number(st.updated_ms)) || lastMs || 0,
     })
   }
 
@@ -1196,6 +1210,13 @@ function buildRows(opts) {
     rows: visible,
     regUsable,
     usage: readUsageWindows(),
+    // 阈值之后动过的会话数，按 **all** 算而不是 visible ——
+    // 今天跑完就关掉的会话（eff=closed，默认不显示）、以及被你手动隐藏的，
+    // 照样是今天产生过对话、照样要上报。按可见行数会漏掉它们，
+    // 而漏的方向是"少报欠账"，正是最不该错的方向。
+    activeSince: activeSinceMs > 0
+      ? all.filter((r) => r.updatedMs >= activeSinceMs).length
+      : 0,
     needYou: all.filter((r) => !r.hidden && (r.baseEff === 'asking' || r.baseEff === 'waiting' || r.baseEff === 'done')).length,
     idleCount: all.filter((r) => r.eff === 'idle').length,
     closedCount: all.filter((r) => r.eff === 'closed').length,

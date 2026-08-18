@@ -276,6 +276,21 @@ function localDate(d) {
 }
 
 /**
+ * 本地"今天零点"的毫秒时刻。
+ *
+ * 与 localDate 同一个口径（本地时区，不是 UTC），刻意放在一起：判断"这个会话是不是
+ * 今天动过"必须和上报目录名切在同一条线上，否则东八区的晚上会出现"看板说今天有 3 个
+ * 会话，而上报目录按另一天算"的错位。
+ *
+ * @param {Date} [d] 参照时刻，缺省取现在
+ * @returns {number} 毫秒时间戳
+ */
+function localDayStartMs(d) {
+  const dt = d || new Date()
+  return new Date(dt.getFullYear(), dt.getMonth(), dt.getDate(), 0, 0, 0, 0).getTime()
+}
+
+/**
  * 解析提醒时间列表，返回规范化结果与看不懂的原始条目。
  *
  * 这是时间格式的**唯一权威**：菜单、对话框、落盘前都过它一遍，规则只写一次。
@@ -406,7 +421,7 @@ module.exports = {
   // 界面层各自硬编码一份的话，改一处必然漏掉另一处（读 A、连 B）
   nasRoot, nasSmbUrl,
   // 上报提醒：前两个是纯函数，主进程和自检都从这里取，不各写一份
-  DEFAULT_REMIND_TIMES, localDate, parseTimes, dueReminders, hasUploadedOn,
+  DEFAULT_REMIND_TIMES, localDate, localDayStartMs, parseTimes, dueReminders, hasUploadedOn,
 }
 
 // 直接运行 = 自检：三条读路径各跑一遍，看真实环境下是否成立
