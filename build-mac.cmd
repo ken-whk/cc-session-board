@@ -32,7 +32,16 @@ cd /d "%~dp0"
 echo.
 echo === Building macOS arm64 package ===
 echo.
-node "node_modules/electron-packager/bin/electron-packager.js" . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --icon=app/icon.icns --ignore="(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/board-capture|^/frames)"
+rem The ignore list must stay in step with pack:win in package.json. It used to be
+rem much shorter here, and every gap is a privacy leak rather than a size problem:
+rem   _env-probe.json  - keyed by session id, records each session's cwd
+rem                      (i.e. every project path you have ever worked in)
+rem   .sdlc / .claude  - must match at ANY depth, not just the package root:
+rem                      app/.sdlc slipped past the old ^/\. anchor and shipped
+rem   docs/, CLAUDE.md - internal working notes, no business being in a handout
+rem state/, hidden.json, ui*.json, _last-payload*, board-capture.png were already
+rem covered - those hold session titles, project paths and your literal prompts.
+node "node_modules/electron-packager/bin/electron-packager.js" . ClaudeBoard --platform=darwin --arch=arm64 --out=dist --overwrite --asar=false --icon=app/icon.icns --ignore="(^/dist$|^/node_modules/electron$|^/state$|.ps1$|.vbs$|.cmd$|^/ui.*.json$|^/hidden.json$|^/_last-payload|^/_env-probe|^/cc-board-focuswin|^/board-capture|^/frames|\.(claude|sdlc|deepcritique)(/|$)|^/\.(quality-lint-state|gitattributes|gitignore)|^/docs$|^/CLAUDE\.md$|^/package-lock\.json$|^/app/icon-source\.jpg$)"
 echo.
 
 rem Put the distribution notes next to the .app -- they must be inside the

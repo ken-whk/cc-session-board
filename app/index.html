@@ -59,6 +59,8 @@
     /* 状态文字色 */
     --c-asking: #d32f2f; --c-waiting: #e07c00; --c-done: #2e7d32; --c-running: #1565c0;
     --c-fresh: #9e9e9e; --c-stalled: #757575; --c-idle: #9e9e9e;
+    /* 已脱钩：比「已关闭」重一档 —— 它还要你点一下，不是看看就算 */
+    --c-detached: #b5502f;
     --c-closed: #8d6e63; --c-hidden: #9e9e9e;
     /* 行底色：只做极淡的暗示，不铺饱和色 */
     --t-asking: #fff4f4; --t-waiting: #fffaf1; --t-done: #f5faf6;
@@ -96,6 +98,7 @@
     --link: #64b5f6;
     --c-asking: #ff6b6b; --c-waiting: #ffab40; --c-done: #66bb6a; --c-running: #64b5f6;
     --c-fresh: #9aa0a6; --c-stalled: #8d9298; --c-idle: #9aa0a6;
+    --c-detached: #e08060;
     --c-closed: #bcaaa4; --c-hidden: #9aa0a6;
     --t-asking: #2a1d1d; --t-waiting: #2a2419; --t-done: #1d2620;
     --t-plain: transparent; --t-dim: #191b1d;
@@ -259,6 +262,7 @@
   tr[data-eff="fresh"]   td.status, .st-fresh   { color: var(--c-fresh); }
   tr[data-eff="stalled"] td.status, .st-stalled { color: var(--c-stalled); }
   tr[data-eff="idle"]    td.status, .st-idle    { color: var(--c-idle); }
+  tr[data-eff="detached"] td.status, .st-detached { color: var(--c-detached); }
   tr[data-eff="closed"]  td.status, .st-closed  { color: var(--c-closed); }
   tr[data-eff="hidden"]  td.status, .st-hidden  { color: var(--c-hidden); }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -686,6 +690,23 @@
     padding: 26px 0 8px; color: var(--fg); font-size: 15px; font-weight: 600;
   }
   .stsec:first-child .stgroup { padding-top: 8px; }
+  /* 组级说明。只给「几个设置项其实是一条链、单看每一项看不出关系」的组用 ——
+     那种组里，关系写在任何一行的说明里都会变成对另一行的位置引用（"上面那条"），
+     行一挪就错。放在组标题下面，它属于整组，不依赖行序。 */
+  .stintro {
+    color: var(--muted); font-size: 11px; line-height: 1.5;
+    margin: -4px 0 8px; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+  }
+  /* 术语与判据的完整说明挂在标题后的问号上（hover 才出）。
+     行内说明只留一句 —— 设置面板是给人扫的，把定义写进正文会让每一行变成一段文档，
+     而真正需要定义的时刻（"脱钩到底指什么"）一年也就那么两三次。 */
+  .sthelp {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 14px; height: 14px; margin-left: 5px; vertical-align: 1px;
+    border: 1px solid var(--line); border-radius: 50%;
+    color: var(--muted); font-size: 10px; line-height: 1; cursor: help; user-select: none;
+  }
+  .sthelp:hover { color: var(--fg); border-color: var(--muted); }
   /* 行结构：标签在左（可带一行小灰字说明），控件靠右，每行一条分隔线。
      原先是「复选框 + 标签」全挤在左边 —— 那样每行左端都是一个方框，
      视线扫下来只看到一列方框、看不出这行在管什么，所以显得机械。 */
@@ -891,12 +912,41 @@
         <div class="stctl"><span class="stsw"><input type="checkbox" id="stFolded"><span class="track"></span><span class="knob"></span></span></div>
       </div>
     </section>
+    <!-- 三项本是一条链的三级，原先拆成两节、中间那项还挂在另一节下面，
+         关系只能靠"上面那条"这种位置引用来说 —— 行一挪就错，读的人也拼不出全貌。
+         合成一节 + ①②③ 编号 + 组级说明：顺序本身就是解释。 -->
     <section class="stsec">
-      <div class="stgroup">自动删除残留记录</div>
+      <div class="stgroup">异常退出的会话</div>
+      <div class="stintro">正常退出不会有残留；关窗口 / 强杀 / 关机才会。残留分三层，按 ①②③ 顺序清，上一层不清下一层不生效。</div>
+      <div class="strow">
+        <div class="stmain">
+          <div class="sttitle">① 脱钩的会话<span class="sthelp" title="脱钩 = 你把终端窗口关了、或它崩了，但 claude 进程没跟着退出。&#10;这种会话再也输入不进去，却占着内存、还挂在列表上催你，列表里标成「⊘ 已脱钩」。&#10;&#10;判据是「它还有没有活的终端通道」。目前只在独立 Git Bash 上验证过，&#10;VS Code 集成终端还没有样本 —— 所以默认只标记，由你右键逐条「结束进程」。&#10;看几天判得准，再开自动结束。">?</span></div>
+          <div class="stdesc">窗口关了、进程还活着，再也输入不进去</div>
+        </div>
+        <div class="stctl col">
+          <span class="stseg" id="stDetached"></span>
+          <!-- 静默守卫只在选「自动结束」时出现：只标记那一档它没有任何作用，
+               摆着一个点了没用的输入框，比不摆更让人怀疑是不是坏了（同上报那两行）。 -->
+          <div class="stsub" id="stDetachedIdle" hidden>
+            <span class="stdesc">静默满</span><input class="stnum" id="stDetachedNum" type="number" min="1" max="1440" step="1"
+                   title="范围 1 分钟 ~ 1 天，超出会自动收到边界"><span class="stdesc">分钟后结束</span><button id="stDetachedSet">应用</button>
+          </div>
+        </div>
+      </div>
+      <div class="strow">
+        <div class="stmain">
+          <div class="sttitle">② 清理注册表条目<span class="sthelp" title="注册表条目 = Claude Code 给每个活会话在 ~/.claude/sessions 下写的一个小文件，一个进程一个。&#10;正常退出时它自己删；被强杀 / 关机就留下了，看板于是以为这个会话还在。&#10;&#10;只清两种：进程确实已经不在的，以及这个进程号已经被别人占了的。&#10;靠进程创建时刻双验身份，不是光看进程号 —— 重启后号会被复用。&#10;第 ③ 步要等它清完才轮得上。">?</span></div>
+          <div class="stdesc">进程已经没了、条目还留着的，自动清掉</div>
+        </div>
+        <div class="stctl"><span class="stsw"><input type="checkbox" id="stRegGc"><span class="track"></span><span class="knob"></span></span></div>
+      </div>
       <!-- 档位与自定义合成一行：它们是同一个设置的两种填法，拆成两行会让人以为
            是两条独立规则。自定义那截只在选中「自定义」时出现（渐进展开）。 -->
       <div class="strow">
-        <div class="stmain"><div class="sttitle">保留多久</div><div class="stdesc">会话没了、注册表也没了、只剩观测记录时，过这么久自动删掉</div></div>
+        <div class="stmain">
+          <div class="sttitle">③ 残留记录保留多久<span class="sthelp" title="残留记录 = 会话没了、②那个条目也没了，只剩看板自己记的观测数据：&#10;标题、摘要、等了你多久。平时列表里看不到，勾「显示全部」才出现。&#10;过这么久就真删，不可撤销。&#10;&#10;别调太短：底栏「今天 N 个会话待上报」是按这些记录数的，&#10;删得比你上报还快就会少算。建议不小于 1 天。">?</span></div>
+          <div class="stdesc">会话和条目都没了、只剩看板记录，过多久删掉</div>
+        </div>
         <div class="stctl col">
           <span class="stseg" id="stPurge"></span>
           <div class="stsub" id="stPurgeCustom" hidden>
@@ -1480,6 +1530,8 @@ function ipcRow(r) {
     // orphan 决定右键菜单里出不出现「删除记录」。漏了它恒为 undefined，
     // 那一项永远不出现 —— 「取消隐藏」当年就是这么少了一个字段查了半天。
     orphan: !!r.orphan,
+    // canEnd 决定右键菜单里出不出现「结束进程」。同上，漏了就永远不出现。
+    canEnd: !!r.canEnd,
   }
 }
 
@@ -1936,6 +1988,9 @@ const ST_THEMES = [['auto', '跟随系统'], ['light', '浅色'], ['dark', '深�
 // 之前没有这一档，值不在档位里（比如 5 小时）时一档都不亮 —— 那是为了不谎报
 // 当前规则，但代价是"到底按什么规则删"界面上没有任何一处直说。
 const ST_PURGE = [[0, '关闭'], [6, '6 小时'], [24, '1 天'], [72, '3 天'], [168, '7 天'], ['custom', '自定义']]
+// 脱钩会话怎么处置。只有两档，刻意不给「自定义」——
+// 中间没有第三种语义，多一个入口只会让人猜它是什么。
+const ST_DETACHED = [['mark', '只标记'], ['kill', '自动结束']]
 // 「自定义」那截输入框是否展开。两种情况展开：你点了「自定义」，
 // 或者当前值本来就不在档位里。点了档位、或自定义值刚好等于某个档位 -> 收起。
 let stPurgeOpen = false
@@ -1976,6 +2031,7 @@ function stSync(s) {
   ck('stNotify', stCur.notify)
   ck('stRemind', stCur.uploadRemind)
   ck('stFolded', stCur.showFolded)
+  ck('stRegGc', stCur.registryGc)
   const t = stCur.uploadRemindTimes || []
   stQ('stTimes').textContent = stCur.uploadRemind
     ? (t.length ? ('当前 ' + t.join(' / ')) : '还没选时间，等于不会提醒')
@@ -2006,6 +2062,19 @@ function stSync(s) {
   })
   stQ('stPurgeCustom').hidden = !openCustom
   if (document.activeElement !== stQ('stPurgeNum')) stQ('stPurgeNum').value = ph || ''
+
+  // 脱钩处置。认不出的取值一律按「只标记」显示 —— 与 applySetting 的兜底同口径，
+  // 界面不能显示成一个数据层根本不会执行的档位。
+  const da = stCur.detachedAction === 'kill' ? 'kill' : 'mark'
+  stSeg(stQ('stDetached'), ST_DETACHED, da, (v) => {
+    stCur.detachedAction = v
+    window.board.setSetting('detachedAction', v)
+    stSync(stCur)
+  })
+  stQ('stDetachedIdle').hidden = da !== 'kill'
+  if (document.activeElement !== stQ('stDetachedNum')) {
+    stQ('stDetachedNum').value = Number(stCur.detachedIdleMinutes) || 10
+  }
 
   // 上报提醒关掉时，藏起只对提醒成立的两行 —— 摆着一组点了没用的控件，
   // 比不摆更让人怀疑"是不是坏了"。
@@ -2038,7 +2107,7 @@ document.addEventListener('keydown', (e) => {
 // 开关类：改完**不关面板** —— 这正是自绘的理由
 for (const [id, key] of [['stTop', 'alwaysOnTop'], ['stTray', 'trayOnMinimize'], ['stLaunch', 'autoLaunch'],
   ['stSound', 'sound'], ['stNotify', 'notify'],
-  ['stRemind', 'uploadRemind'], ['stFolded', 'showFolded']]) {
+  ['stRemind', 'uploadRemind'], ['stFolded', 'showFolded'], ['stRegGc', 'registryGc']]) {
   stQ(id).addEventListener('change', () => {
     const v = stQ(id).checked
     // 本地先记一份再送出去。settings 每 1.5 秒推一次，主进程把新值写回来之前
@@ -2070,6 +2139,16 @@ stQ('stPurgeSet').addEventListener('click', () => {
 // 回车等于点「应用」。输进去不生效、还得再找按钮，是这类输入框最常见的卡点。
 stQ('stPurgeNum').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); stQ('stPurgeSet').click() }
+})
+// 静默守卫：同上，只送原始值，夹取交给 applySetting
+stQ('stDetachedSet').addEventListener('click', () => {
+  const n = Math.round(Number(stQ('stDetachedNum').value) || 0)
+  if (n <= 0) return
+  stCur.detachedIdleMinutes = n
+  window.board.setSetting('detachedIdleMinutes', n)
+})
+stQ('stDetachedNum').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); stQ('stDetachedSet').click() }
 })
 // 域账号：change（失焦/回车）才提交，不在打字过程中每个字母都写盘
 stQ('stNasUser').addEventListener('change', async () => {
@@ -2533,12 +2612,26 @@ function refreshLiveHelp() {
   }).catch(() => { })
 }
 
-function openHelp() {
+async function openHelp() {
   // buildHelp 是异步的（要向主进程取状态图例），首次打开必须等它建好格子
   // 再去刷实时状态，否则 liveCells 还是空的。
-  if (!helpBuilt) buildHelp().then(refreshLiveHelp).catch(() => { })
-  else refreshLiveHelp()
+  //
+  // 而且必须**建完再显示**：原先是先 add('on') 再等内容回来，于是第一次点开
+  // 会看到一个小空面板、文字随后"长"出来（明显闪跳，实测）。第二次起没有，
+  // 因为 helpBuilt 已经是 true —— 这种"只有第一次有"的现象最容易被当成偶发忽略。
+  // 配合下面的预热，正常情况下这个 await 已经是空转。
+  if (!helpBuilt) { try { await buildHelp() } catch (_) { } }
+  refreshLiveHelp()
   mask.classList.add('on')
+}
+
+// 预热：开板后趁空把帮助面板建好，让上面那个 await 永远不用真的等。
+// 不放进启动主路径 —— 它要一次 IPC，抢的是首屏那点时间；用 idle 回调让它
+// 排在首帧之后。3 秒兜底是防"一直不空闲"（那种情况下 await 兜住，不会出错）。
+if (window.requestIdleCallback) {
+  requestIdleCallback(() => { if (!helpBuilt) buildHelp().catch(() => { }) }, { timeout: 3000 })
+} else {
+  setTimeout(() => { if (!helpBuilt) buildHelp().catch(() => { }) }, 1200)
 }
 
 function closeHelp() { mask.classList.remove('on') }

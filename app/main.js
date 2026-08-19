@@ -27,9 +27,14 @@ const ICON_LARGE = path.join(__dirname, 'icon-large.png')
 const ICON_WINDOW = process.platform === 'win32' ? path.join(__dirname, 'icon.ico') : ICON_LARGE
 const REFRESH_MS = 1500
 
+// 进程身份 / 脱钩探测的周期。远慢于 REFRESH_MS 是硬要求，不是调优 ——
+// 探测要起一个 powershell 子进程，跟着 1.5 秒的刷新走等于每秒拉一个进程起来。
+const PROBE_MS = 30 * 1000
+
 let win = null
 let tray = null
 let timer = null
+let probeTimer = null
 let firstRender = true
 const prevStatus = new Map()
 
@@ -72,6 +77,23 @@ let settings = {
   // 存小时是为了让用户能填任意时长（界面上按小时/天输入，落盘统一成小时）。
   // 不放心自动删数据就在设置里调到「关闭」，右键「删除记录」照样可用。
   autoPurgeHours: 72,
+  // 注册表残留清理。默认开：它只删 `~/.claude/sessions/<pid>.json` 里
+  // **进程已经不在、或 pid 已被复用**的那些条目（身份靠 procStart 校验，
+  // 不是光看 pid），删错的唯一后果是 Claude Code 下次开会话重新写一份。
+  // 而不开的代价是确定的：上游不清，下游 autoPurge 永远不触发，
+  // 残留记录挂在看板上不会走（实测挂过 16 小时）。
+  registryGc: true,
+  // 脱钩会话（终端窗口没了但进程还活着）怎么处置。
+  // 'mark' 只标记（默认）/ 'kill' 静默够久后自动结束进程。
+  //
+  // 默认只标记是刻意的：判据（有没有活的 console）目前只有独立 Git Bash
+  // 这一类宿主的样本，VS Code 集成终端走 ConPTY，一个样本都没有。
+  // 标错一个徽标可以撤，杀错一个正在跑的会话撤不回来 —— 先让人看几天准不准，
+  // 觉得判对了再去菜单里打开自动结束。
+  detachedAction: 'mark',
+  // 自动结束前要求的静默时长（分钟）。脱钩的会话可能正跑到一半（还在写文件），
+  // 立刻杀会把它截断在半路。
+  detachedIdleMinutes: 10,
   // NAS 归档面板看谁的目录（域账号）。空 = 用推测值。
   //
   // 必须能记住：共享盘上是全公司每个人一个目录，不记的话每次打开都要在一长串
@@ -304,6 +326,19 @@ function showNotification(title, body, silent, sessionId, onClick) {
 
 // ---- 定时刷新 ----
 
+// 探一轮所有注册会话的进程身份 + 终端通道。结果落进 board-core 的缓存，
+// 由后续的 tick 同步消费 —— 数据层那边全程不阻塞。
+//
+// 探完主动补一帧：不补的话新结论要等下一个 1.5 秒周期才显示，
+// 而首次探测正好发生在开板那一刻，那一眼看到的就是旧判定。
+function probeTick() {
+  try {
+    core.refreshProcProbe(core.probeTargets(core.readRegistry()), () => tick())
+  } catch (e) {
+    console.warn('[board] proc probe failed: ' + (e && e.message))
+  }
+}
+
 function tick() {
   let res
   try {
@@ -311,6 +346,9 @@ function tick() {
       sortIndex: settings.sort,
       showFolded: settings.showFolded,
       autoPurgeHours: settings.autoPurgeHours,
+      registryGc: settings.registryGc,
+      detachedAction: settings.detachedAction,
+      detachedIdleMinutes: settings.detachedIdleMinutes,
       // 「今天动过的会话有几个」。纯本地计算（比对 state 的 updated_ms），
       // 不碰 NAS —— 底栏那条指示的**数字**来自这里，**该不该显示**才来自
       // 那一天最多几次的 NAS 核对。两件事分开，才不至于为了刷新一个数字
@@ -400,6 +438,12 @@ ipcMain.handle('board:getSessionMeta', (_e, transcript) => {
 ipcMain.handle('board:removeRecord', (_e, sid) => { core.removeRecord(sid); tick(); return true })
 ipcMain.handle('board:unhideRecord', (_e, sid) => { core.unhideRecord(sid); tick(); return true })
 ipcMain.handle('board:purgeRecord', (_e, sid) => { const ok = core.purgeRecord(sid); tick(); return ok })
+// 结束进程：数据层会**重新探一次**再决定动不动手（右键菜单拿的是上一帧快照），
+// 所以这里是异步的。杀完立刻补一帧，让那一行当场翻成「已关闭」——
+// 否则要等下一个探测周期（30s）才变，人会以为没点动。
+ipcMain.handle('board:endProcess', (_e, sid) => new Promise((resolve) => {
+  core.endProcess(sid, (ok) => { tick(); resolve(ok) })
+}))
 ipcMain.handle('board:openFolder', (_e, dir) => { if (dir) shell.openPath(dir); return true })
 // 帮助面板的状态图例走数据层，别在页面里再抄一份字形和配色
 ipcMain.handle('board:statusLegend', () => core.statusLegend())
@@ -670,6 +714,17 @@ ipcMain.on('board:contextMenu', (e, row) => {
       toolTip: '这个会话已经不在了，只剩一条观测记录。删掉不可撤销，也不会再回来',
       click: () => { core.purgeRecord(row.sessionId); tick() },
     }] : []),
+    // 「结束进程」只对已脱钩的行出现（row.canEnd，判据在数据层）。同「删除记录」
+    // 一样按行条件显示 —— 给活会话这个入口等于递给人一把误伤自己的刀。
+    //
+    // 这是第四个动作词，与隐藏/取消隐藏/删除记录**不是同义词**：前三个动的是
+    // 观测记录，这个动的是真实进程。脱钩会话两样都要收，而且必须先杀进程 ——
+    // 进程不死，pid 判活就翻不成「已关闭」，注册表 GC 和自动删除依次接不上。
+    ...(row.canEnd ? [{
+      label: '结束进程',
+      toolTip: '这个会话的终端窗口已经没了，再也输入不进去。结束它的进程，记录随后自动回收',
+      click: () => confirmEndProcess(row, BrowserWindow.fromWebContents(e.sender)),
+    }] : []),
     { label: '复制目录路径', click: () => { if (row.cwd) clipboard.writeText(String(row.cwd)) } },
     { label: '打开目录', click: () => { if (row.cwd) shell.openPath(row.cwd) } },
     ...((process.platform === 'win32' || process.platform === 'darwin') ? [{
@@ -686,6 +741,43 @@ ipcMain.on('board:contextMenu', (e, row) => {
   ])
   menu.popup({ window: BrowserWindow.fromWebContents(e.sender) })
 })
+
+// 结束进程前问一句。
+//
+// Why 这里要确认而「删除记录」不用：那个判据（注册表里还有没有这个 id）是读文件，
+// 对错当场可查；这个判据（有没有活的 console）目前只有独立 Git Bash 一类宿主的
+// 样本，VS Code 集成终端走 ConPTY，一个样本都没有。判错的后果是杀掉一个人正在用的
+// 会话 —— 在判据攒够样本之前，这一句确认就是最后一道人肉护栏。
+// 判准了之后可以把这个对话框去掉，届时连同本注释一起删。
+function confirmEndProcess(row, parent) {
+  const title = String(row.title || row.label || row.sessionId || '').slice(0, 60)
+  dialog.showMessageBox(parent, {
+    type: 'warning',
+    buttons: ['结束进程', '取消'],
+    defaultId: 1,
+    cancelId: 1,
+    title: '结束进程',
+    message: '结束这个会话的进程？',
+    detail: title + '\n\n看板判定它已脱钩：终端窗口没了，进程还活着，再也输入不进去。'
+      + '\n结束后它会变成「已关闭」，记录随后自动回收。'
+      + '\n\n如果你还能在某个终端窗口里找到并操作它，说明这次判错了 —— 请点取消。',
+  }).then((r) => {
+    if (r.response !== 0) return
+    core.endProcess(row.sessionId, (ok) => {
+      tick()
+      if (ok) return
+      // 失败要说话。静默失败在这里特别坏：人点完看它还在，会反复点，
+      // 而真正的原因（复核时发现它其实还活着）恰恰是最该被看见的那条信息。
+      dialog.showMessageBox(parent, {
+        type: 'info',
+        title: '没有结束',
+        message: '没有结束这个进程',
+        detail: '动手前会重新探一次。这次复核没通过 —— 它可能刚被 --resume 拉起来、'
+          + 'pid 已被别的进程复用、或者探测本身失败了。看板下一轮会自己纠正显示。',
+      })
+    })
+  })
+}
 
 // 把主题同步给 Electron 本身。
 //
@@ -717,6 +809,17 @@ function applySetting(key, value) {
   if (key === 'autoPurgeHours') {
     const n = Math.round(Number(value) || 0)
     value = n <= 0 ? 0 : Math.min(Math.max(n, 1), 24 * 365)
+  }
+  // 静默守卫的下限 1 分钟：再短就等于没有守卫，会把正跑到一半（还在写文件）
+  // 的脱钩会话截断。上限 1 天纯防呆。和上面同一条纪律 —— 校验只写在这一处。
+  if (key === 'detachedIdleMinutes') {
+    const n = Math.round(Number(value) || 0)
+    value = Math.min(Math.max(n, 1), 24 * 60)
+  }
+  // 只认这两个取值。菜单之外的来路（旧配置文件、手改 json）给了别的值时
+  // 退回 'mark' —— 认不出的取值绝不能落进"自动杀进程"那一档。
+  if (key === 'detachedAction') {
+    value = value === 'kill' ? 'kill' : 'mark'
   }
   settings[key] = value
   if (key === 'theme') applyThemeSource()
@@ -1347,6 +1450,14 @@ if (!app.requestSingleInstanceLock()) {
     createTray()
     tick()
     timer = setInterval(tick, REFRESH_MS)
+
+    // 进程身份 / 脱钩探测单独一个慢周期，**绝不搭 tick 的车** ——
+    // 它要起一个 powershell（约 300ms），混进 1.5 秒的循环就是每秒钟
+    // 拉一个进程起来。脱钩本身是低频事件（实测 5 天 2 次），30 秒足够灵敏。
+    // 首次立刻探一次：不探的话开板后头 30 秒里脱钩的行会显示成「等你输入」，
+    // 而那正是人开板第一眼要看的时候。
+    probeTick()
+    probeTimer = setInterval(probeTick, PROBE_MS)
 
     // 上报提醒单独一个慢周期，不搭 tick 的车 —— 它到点要读 NAS，
     // 混进 1.5 秒的循环就成了后台轮询共享盘。首次检查也等这 30 秒：

@@ -14,6 +14,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const { createHash } = require('crypto')
+const { execFile } = require('child_process')
 
 // ---- 可调阈值 ----
 
@@ -279,9 +280,14 @@ function statusMeta(status) {
     case 'fresh':   return { rank: 4, text: '○ 空闲',     accent: '#9E9E9E', back: '#FFFFFF', fore: '#909090', desc: '会话开着但还没交互过' }
     case 'stalled': return { rank: 5, text: '… 失联？',   accent: '#757575', back: '#FAFAFA', fore: '#909090', desc: '心跳静默超过 5 分钟（仅注册表降级时出现）' }
     case 'idle':    return { rank: 6, text: '· 久候',     accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0', desc: '超过 2 小时没被处理，默认不显示' }
-    case 'closed':  return { rank: 7, text: '✕ 已关闭',   accent: '#8D6E63', back: '#FAFAFA', fore: '#A0A0A0', desc: '进程已退出（按 pid 精确判定），默认不显示' }
-    case 'hidden':  return { rank: 8, text: '· 已隐藏',   accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0', desc: '你手动隐藏的，默认不显示；它下次有动静会自己回来' }
-    default:        return { rank: 9, text: '? ' + status, accent: '#555555', back: '#FFFFFF', fore: '#222222', desc: '' }
+    // 「久候」与「已脱钩」语义相反，不能混在一档：久候是等你回来处理，
+    // 脱钩是你回不来了 —— 终端窗口已经没了，这个会话再也输入不进去。
+    // 它**默认可见**（不像久候/已关闭那样折起来）：进程还占着内存，
+    // 需要你点一下收掉，藏起来等于永远不处理。
+    case 'detached': return { rank: 7, text: '⊘ 已脱钩', accent: '#B5502F', back: '#FFF6F2', fore: '#8A8A8A', desc: '终端窗口已经关了、进程却还活着：再也输入不进去，却占着内存挂在这儿。与「久候」相反 —— 久候是等你回来处理，脱钩是你回不来了。右键「结束进程」收掉' }
+    case 'closed':  return { rank: 8, text: '✕ 已关闭',   accent: '#8D6E63', back: '#FAFAFA', fore: '#A0A0A0', desc: '进程已退出（按 pid 精确判定），默认不显示' }
+    case 'hidden':  return { rank: 9, text: '· 已隐藏',   accent: '#9E9E9E', back: '#FAFAFA', fore: '#A0A0A0', desc: '你手动隐藏的，默认不显示；它下次有动静会自己回来' }
+    default:        return { rank: 10, text: '? ' + status, accent: '#555555', back: '#FFFFFF', fore: '#222222', desc: '' }
   }
 }
 
@@ -323,7 +329,7 @@ function hostMeta(host) {
 // 帮助面板的状态图例。顺序 = rank 顺序 = 「需求度」排序的顺序，
 // 所以图例本身就解释了默认排法。
 function statusLegend() {
-  return ['asking', 'waiting', 'done', 'running', 'fresh', 'stalled', 'idle', 'closed', 'hidden']
+  return ['asking', 'waiting', 'done', 'running', 'fresh', 'stalled', 'idle', 'detached', 'closed', 'hidden']
     .map((eff) => {
       const m = statusMeta(eff)
       // 字形与文字拆开给界面：图例里字形要单独占一列才能对齐
@@ -373,6 +379,143 @@ function isPidAlive(pid) {
   } catch (e) {
     return e && e.code === 'EPERM'
   }
+}
+
+// 结束一个进程。只给脱钩会话用（判据见 procIdentity）。
+//
+// 只能强杀：脱钩会话已经没有 console，Ctrl+C 那条路
+// （GenerateConsoleCtrlEvent）本来就送不进去；而且它已经不可能再交互，
+// 没有"优雅退出"可言 —— SessionEnd hook 拿不到，state 由 pid 判死后自然收敛。
+function killPid(pid) {
+  const n = Number(pid)
+  if (!Number.isInteger(n) || n <= 0) return false
+  try { process.kill(n, 'SIGKILL'); return true } catch (_) { return false }
+}
+
+// ---- 进程身份校验 + 终端通道探测 ----
+//
+// 解决两个不同的问题，共用一次外部调用 —— 起 powershell 约 300ms，
+// **绝不能进 1.5s 刷新路径**，所以做成异步 + 缓存，由界面层定时驱动。
+//
+//   ① 身份校验：pid 会被系统复用。注册表文件名就是 pid，机器重启后
+//      17552.json 可能指向一个毫不相干的新进程 —— 裸 isPidAlive 会把
+//      5 天前的死记录显示成"还活着"，比不清理还难办。
+//      pid + procStart（进程创建时刻）才是唯一身份。
+//   ② 脱钩检测：终端窗口被强杀（关窗 / taskkill / 崩溃）时 SessionEnd
+//      不触发（见 CLAUDE.md 已知硬限制），claude 进程活下来但输入通道已断。
+//      判据 = 它还有没有活的 console。
+//
+// 为什么探测放**独立子进程**而不是看板进程里直接调 AttachConsole：
+// 附加期间调用方会成为目标 console 的进程组成员，那一刻目标终端里的
+// Ctrl+C 会打到调用方身上。子进程被打死无所谓，看板不能死。
+// （看板自身无 console，实测 AttachConsole(看板 pid) 返回 err=6，
+// 所以子进程 FreeConsole 那一步在这里是空操作，留着是为了从终端跑自检时也安全。）
+
+// 探测结果的有效期。脱钩是低频事件（实测 5 天 2 次），60s 足够灵敏；
+// 再短就是拿 powershell 启动成本换没人看得出的响应速度。
+const PROBE_TTL_MS = 60 * 1000
+
+// pid -> { alive, procStart, console, ms }
+const procProbe = new Map()
+let procProbeBusy = false
+
+// procStart 归一化到**微秒**粒度再比。
+//
+// 注册表那份是 Claude Code 直接读的 FILETIME 原值（100ns 精度），
+// 而我们只能经 WMI 拿，WMI 的 CreationDate 只到微秒，最后一位 100ns 恒为 0
+// （实测：注册表 ...804547945 vs WMI ...804547940，六个样本全部差在末位）。
+//
+// 直接字符串全等比会**全线不匹配** —— 那样每个活会话都被判成 pid 复用残留，
+// GC 删光注册表文件，isOrphan 随即全线成立，autoPurge 再把 state 一起清空。
+// 一个精度差能清空全部数据，所以这里必须降精度，且不许改回全等。
+function procStartKey(v) {
+  const s = String(v == null ? '' : v).replace(/\D/g, '')
+  return s.length > 1 ? s.slice(0, -1) : ''
+}
+
+// 这个 pid 此刻是不是注册表条目记的那个进程。
+// 探测结果拿不到（未探测 / 非 Windows / 探测失败）时返回 null = "不知道"，
+// 调用方必须把 null 当"别动它"，绝不能当 false 处理。
+function procIdentity(rg) {
+  const pid = rg && Number(rg.pid)
+  if (!Number.isInteger(pid) || pid <= 0) return null
+  const p = procProbe.get(pid)
+  if (!p) return null
+  // 判据新鲜度。删文件 / 杀进程这类不可逆动作只认新鲜结论；
+  // 陈旧结论仍可用于显示（标错一个徽标可以撤，删错文件撤不回来）。
+  const fresh = (Date.now() - p.ms) <= PROBE_TTL_MS * 2
+  if (!p.alive) return { alive: false, sameProc: false, hasConsole: false, fresh }
+  // 注册表里没有 procStart（老版本 Claude Code）时不做身份判定，
+  // 只报存活 —— 缺字段是"判不了"，不是"对不上"。
+  const want = procStartKey(rg.procStart)
+  const got = procStartKey(p.procStart)
+  const sameProc = (!want || !got) ? true : want === got
+  return { alive: true, sameProc, hasConsole: !!p.console, fresh }
+}
+
+// 一次探完所有 pid。失败静默返回 —— 探测是增强信号，拿不到就退回原有行为。
+function refreshProcProbe(pids, cb) {
+  const done = typeof cb === 'function' ? cb : function () { }
+  const list = []
+  for (const p of pids || []) {
+    const n = Number(p)
+    if (Number.isInteger(n) && n > 0 && list.indexOf(n) < 0) list.push(n)
+  }
+  // 非 Windows 没有 console 这个概念，AttachConsole 也不存在 ——
+  // 整个特性在 mac 上关闭（宁可不判，不可乱判）。
+  if (process.platform !== 'win32' || list.length === 0 || procProbeBusy) return done()
+
+  procProbeBusy = true
+  const ps = [
+    'Add-Type -Namespace CB -Name Con -MemberDefinition \'',
+    '[DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint pid);',
+    '[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();',
+    '\'',
+    '[CB.Con]::FreeConsole() | Out-Null',
+    '$out = @()',
+    'foreach ($p in ' + list.join(',') + ') {',
+    '  $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue',
+    '  $ft = if ($proc) { $proc.CreationDate.ToFileTime().ToString() } else { "" }',
+    '  $ok = [CB.Con]::AttachConsole($p)',
+    '  if ($ok) { [CB.Con]::FreeConsole() | Out-Null }',
+    '  $out += [pscustomobject]@{ pid=$p; alive=[bool]$proc; procStart=$ft; console=[bool]$ok }',
+    '}',
+    // 单条结果时 ConvertTo-Json 出的是对象不是数组，外面套一层保证形状恒定
+    'ConvertTo-Json -Compress -InputObject @($out)',
+  ].join('\n')
+
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
+    { timeout: 20000, windowsHide: true, maxBuffer: 1024 * 1024 },
+    (err, stdout) => {
+      procProbeBusy = false
+      if (err) return done()
+      let arr = null
+      try { arr = JSON.parse(String(stdout || '').trim()) } catch (_) { return done() }
+      if (!Array.isArray(arr)) return done()
+      const ms = Date.now()
+      for (const o of arr) {
+        const n = Number(o && o.pid)
+        if (!Number.isInteger(n) || n <= 0) continue
+        procProbe.set(n, { alive: !!o.alive, procStart: String(o.procStart || ''), console: !!o.console, ms })
+      }
+      // 过期条目清掉，免得进程早没了还留着一条陈旧判据
+      for (const [k, v] of procProbe) if (ms - v.ms > PROBE_TTL_MS * 5) procProbe.delete(k)
+      done()
+    })
+}
+
+// 注册表里所有会话的 pid（探测输入）。SDK 会话排除在外 ——
+// 它压根没有自己的终端窗口（CLAUDE.md 铁律 9），console 探测对它恒为假，
+// 会把一个完全正常的 SDK 会话判成脱钩。
+function probeTargets(reg) {
+  const out = []
+  for (const rg of reg.values()) {
+    if (!rg) continue
+    if (String(rg.entrypoint || '').startsWith('sdk')) continue
+    const n = Number(rg.pid)
+    if (Number.isInteger(n) && n > 0) out.push(n)
+  }
+  return out
 }
 
 function readStates() {
@@ -858,12 +1001,47 @@ function buildRows(opts) {
   // 只有一处定义，而这里也不必认识"天"这个概念（与 autoPurgeHours 同一条纪律）。
   const activeSinceMs = Math.max(0, Number(opts && opts.activeSinceMs) || 0)
 
+  // 注册表残留清理开关。**不传时默认关闭**，与 autoPurgeHours 同一条纪律 ——
+  // `node board-core.js` 自检和任何未显式开启的调用都不许删数据。
+  const registryGc = !!(opts && opts.registryGc)
+
+  // 脱钩会话怎么处置：'mark' 只标记（默认）/ 'kill' 静默够久后结束进程。
+  // 默认只标记是刻意的：判据目前只有 winpty 宿主的样本，ConPTY（VS Code 集成
+  // 终端）路径一个样本都没有。判错时"标错一个徽标"可以撤，"杀掉正在跑的会话"撤不回来。
+  const detachedAction = (opts && opts.detachedAction === 'kill') ? 'kill' : 'mark'
+  // 结束进程前要求的静默时长（分钟）。脱钩的会话可能正跑到一半（还在写文件），
+  // 立刻杀会把它截断在半路 —— 等它真的停了再动。
+  const detachedIdleMs = Math.max(1, Number(opts && opts.detachedIdleMinutes) || 10) * 60 * 1000
+
   const now = Date.now()
   const reg = readRegistry()
   const states = readStates()
   const hidden = readHidden()
   const regUsable = reg.size > 0
   let hiddenDirty = false
+
+  // ---- 注册表残留 GC ----
+  //
+  // 治的是三信源里**最上游**那一半：`~/.claude/sessions/<pid>.json` 没人负责删。
+  // 强杀终端 / 关机不触发 SessionEnd（已知硬限制），文件就永久留着，
+  // 而 isOrphan 要求"注册表里没有这个 id" —— 上游不清，下游的自动删除
+  // （autoPurge）永远不触发。实测有条目挂了 16 小时不消失，根子就在这。
+  //
+  // 两种该删的情形，都必须有**新鲜的**探测结论才动手：
+  //   pid 已经不存在      -> 进程走了，文件是残留
+  //   pid 在但 procStart 对不上 -> pid 被系统复用了，这条指向别人的进程
+  // 判不了（没探测结果 / 非 Windows / 探测失败）一律不动 —— 见 procIdentity 的 null 语义。
+  if (registryGc && regUsable) {
+    for (const [sid, rg] of Array.from(reg.entries())) {
+      const ident = procIdentity(rg)
+      if (!ident || !ident.fresh) continue
+      if (ident.alive && ident.sameProc) continue
+      try { fs.unlinkSync(path.join(SESSIONS_DIR, String(rg.pid) + '.json')) } catch (_) { continue }
+      // 同帧内把内存里这份也摘掉，否则本帧的 isOrphan 还看得见它，
+      // 下游要等下一帧才生效 —— 两半状态不一致会让人以为"删了没用"。
+      reg.delete(sid)
+    }
+  }
 
   // 记下这一帧见到的所有注册 id。只在注册表可用时记 —— 整体读不到那一帧
   // 什么都没见到，不能因此把已知的记忆当成"从未注册过"。
@@ -945,6 +1123,23 @@ function buildRows(opts) {
     const alive = !!(rg && isPidAlive(rg.pid)) || statePidAlive === true
     const regStatus = (rg && rg.status) ? String(rg.status) : ''
 
+    const ident = procIdentity(rg)
+    // pid 被系统复用：注册表这条指向的已经不是当初那个会话了，它其实早退出了。
+    // 少了这一条，机器重启后老记录会因为"pid 恰好被别人占了"而显示成还活着 ——
+    // 那比不清理更糟，因为它看起来是个正常的活会话。
+    const pidReused = !!(ident && ident.alive && !ident.sameProc)
+    // 脱钩：进程活着、身份对得上、但没有活的 console。
+    // 终端窗口已经没了，输入通道断了，再也送不进去字符。
+    // ident 为 null（还没探过 / 非 Windows / 探测失败）时**不判** —— 见 procIdentity 的 null 语义。
+    const detached = !!(ident && ident.alive && ident.sameProc && !ident.hasConsole)
+
+    // 自动结束脱钩进程。默认关闭，开了也要过静默守卫：脱钩的会话可能正跑到
+    // 一半（还在写文件），立刻杀会把它截断在半路。等它真的停了再动。
+    // 只认新鲜判据 —— 杀进程不可逆。
+    if (detached && detachedAction === 'kill' && ident.fresh && silent > detachedIdleMs) {
+      killPid(rg && rg.pid)
+    }
+
     let eff
     if (!regUsable) {
       eff = legacyStatus(st, hasBeat, silent, tp)
@@ -952,8 +1147,10 @@ function buildRows(opts) {
       // 从未注册过：没 pid 可判、没心跳可测，按它自己的 hook 记录说状态，
       // 不断言已关闭（那会把还活着的会话默认隐藏掉）
       eff = legacyStatus(st, hasBeat, silent, tp)
-    } else if (!alive) {
+    } else if (!alive || pidReused) {
       eff = 'closed'
+    } else if (detached) {
+      eff = 'detached'
     } else if (hasBeat && silent > ASK_PROBE_AFTER_MS && testAskBlocking(tp)) {
       eff = 'asking'
     } else if (regStatus === 'busy') {
@@ -1137,6 +1334,9 @@ function buildRows(opts) {
       // 界面靠它决定右键菜单里出不出现「删除记录」—— 删不掉的行干脆不给入口，
       // 免得点下去没反应还得解释为什么。判据由数据层单一定义，界面不自己算。
       orphan: isOrphan(reg, regUsable, id),
+      // 这一行能不能「结束进程」。与 orphan 同一条纪律：判据由数据层单一定义，
+      // 界面按行条件出菜单项 —— 对活会话给这个入口等于给人一把误伤自己的刀。
+      canEnd: eff === 'detached' && !!(rg && Number(rg.pid) > 0),
       rank: meta.rank,
       statusText,
       accent: meta.accent,
@@ -1219,6 +1419,7 @@ function buildRows(opts) {
       : 0,
     needYou: all.filter((r) => !r.hidden && (r.baseEff === 'asking' || r.baseEff === 'waiting' || r.baseEff === 'done')).length,
     idleCount: all.filter((r) => r.eff === 'idle').length,
+    detachedCount: all.filter((r) => r.eff === 'detached').length,
     closedCount: all.filter((r) => r.eff === 'closed').length,
     hiddenCount: all.filter((r) => r.hidden).length,
     liveCount: all.filter((r) => r.baseEff !== 'closed').length,
@@ -1292,6 +1493,37 @@ function unhideRecord(sid) {
 // 这里必须同时扫注册表，不能只扫 state 文件 ——
 // 进程已死但注册表条目还在的行**根本没有 state 文件**（强杀不触发 SessionEnd），
 // 老实现只 unlink state 文件，对这类行完全无效，是同一个根因的第二个症状。
+// 结束进程：把一个**已脱钩**会话的 claude 进程强杀掉。
+//
+// 与「删除记录」互补而不是替代 —— 那个删的是观测记录（state 文件），
+// 这个动的是真实进程。脱钩会话两样都要：进程占着内存、记录挂在看板上，
+// 但只有进程先死，pid 判活才会翻成「已关闭」，下游的注册表 GC 和自动删除
+// 才依次接得上。反过来先删记录没用，注册表还在，下一帧原地重建（铁律 6）。
+//
+// 判据在这里**重新探一次**，不信调用方传来的行快照：右键菜单拿的是上一帧的，
+// 点下去那一刻它可能刚被 --resume 拉起来、或者 pid 已经被别人复用。
+// 探测是异步的，所以这个函数也是异步的。
+function endProcess(sid, cb) {
+  const done = typeof cb === 'function' ? cb : function () { }
+  if (!sid) return done(false)
+  const reg = readRegistry()
+  const rg = reg.get(String(sid))
+  const pid = rg && Number(rg.pid)
+  if (!Number.isInteger(pid) || pid <= 0) return done(false)
+  if (String(rg.entrypoint || '').startsWith('sdk')) return done(false)
+
+  refreshProcProbe([pid], () => {
+    const ident = procIdentity(rg)
+    // 判不了就不动。这里刻意不退回"反正看板显示它脱钩了就杀"——
+    // 探测失败的原因可能正是系统繁忙，那时候更不该做不可逆的事。
+    if (!ident || !ident.fresh) return done(false)
+    if (!ident.alive) return done(false)
+    if (!ident.sameProc) return done(false)
+    if (ident.hasConsole) return done(false)
+    done(killPid(pid))
+  })
+}
+
 module.exports = {
   // countActiveSubwork 单独导出，是为了能用**构造样本**验它 —— 它的两条判据
   // （子代理 mtime / 后台任务的登记与完成通知）都依赖真实运行时才会出现的文件，
@@ -1301,7 +1533,10 @@ module.exports = {
   // 上报面板要把 transcript 里的 cwd 翻成项目名，用的必须是同一套推导 ——
   // 各写一份的话，同一个会话在两个界面上会显示成两个不同的项目名。
   labelFromCwd,
-  removeRecord, unhideRecord, purgeRecord, formatDuration,
+  removeRecord, unhideRecord, purgeRecord, endProcess, formatDuration,
+  // 探测由界面层定时驱动（起 powershell 约 300ms，不能进 1.5s 刷新路径）。
+  // probeTargets 一并导出，免得调用方自己去猜该探哪些 pid。
+  refreshProcProbe, probeTargets, readRegistry,
   // 用量快照的读取与路径由数据层单一定义，界面层/引导层都从这里取 ——
   // 各自硬编码一份路径的话，改一处就会静默错位（引导写 A、看板读 B）。
   readUsageWindows, readSessionMeta, USAGE_SNAPSHOT, HUD_DIR, HUD_CONTEXT_CACHE_DIR,
@@ -1311,6 +1546,11 @@ module.exports = {
 // ---- 直接运行时作自检 ----
 if (require.main === module) {
   const asJson = process.argv.includes('--json')
+  // 自检时先同步探一次，否则 procIdentity 全是 null、脱钩那一档永远走不到，
+  // 命令行看到的结果和看板上的不是一回事（看板由定时器驱动探测）。
+  // 这里刻意不带 registryGc / detachedAction —— 自检不许删数据、不许杀进程。
+  refreshProcProbe(probeTargets(readRegistry()), () => run())
+  function run() {
   const res = buildRows({ sortIndex: 1, showFolded: true })
   if (asJson) {
     process.stdout.write(JSON.stringify(res, null, 2))
@@ -1334,5 +1574,6 @@ if (require.main === module) {
         pad(r.label.slice(0, 15), 34) + pad(r.waitText, 10) +
         pad(r.durText, 10) + pad(r.silentText, 10) + r.lifeText)
     }
+  }
   }
 }
